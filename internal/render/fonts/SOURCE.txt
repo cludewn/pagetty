@@ -1,0 +1,13 @@
+BIZ UDGothic (通常・太字、未改変)
+取得日: 2026-11-20
+ライセンス: SIL Open Font License 1.1 (OFL.txt)
+
+https://github.com/google/fonts/blob/main/ofl/bizudgothic/BIZUDGothic-Regular.ttf
+SHA-256: 709fcd41e3209fb765da750472f55ccdf925653e9fa7e1eb007cb65c8f749c75
+
+https://github.com/google/fonts/blob/main/ofl/bizudgothic/BIZUDGothic-Bold.ttf
+SHA-256: 98a528b6b638463041968783cc0f63adaf4cdc26f5398afed68bab712d1113f3
+
+https://github.com/google/fonts/blob/main/ofl/bizudgothic/OFL.txt
+SHA-256: 2b5ec1d32c0bc3f76d8cab11ecb65f9d9d43801ce124a7ec2b2e3061e8f4e9ea
+OFL.txtは行末空白のみ正規化。フォントファイルは未改変。
