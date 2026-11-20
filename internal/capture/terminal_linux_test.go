@@ -160,6 +160,38 @@ func TestRunCtrlC(t *testing.T) {
 	}
 }
 
+func TestRunSignalExit(t *testing.T) {
+	for _, tc := range []struct {
+		signal      string
+		interrupted bool
+	}{
+		{"SEGV", false},
+		{"ABRT", false},
+		{"ILL", false},
+		{"INT", true},
+		{"TERM", true},
+		{"HUP", true},
+		{"KILL", false},
+	} {
+		t.Run(tc.signal, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			result, err := Run(ctx, []string{"/bin/sh", "-c", "printf before; kill -" + tc.signal + " $$"},
+				Options{Columns: 20, Rows: 3, Output: io.Discard})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !result.Started || result.ExitCode != -1 || result.Interrupted != tc.interrupted {
+				t.Fatalf("started=%t exit=%d interrupted=%t, want started=true exit=-1 interrupted=%t",
+					result.Started, result.ExitCode, result.Interrupted, tc.interrupted)
+			}
+			if got := rowTexts(result.Document); !reflect.DeepEqual(got, []string{"before"}) {
+				t.Fatalf("display=%q, want [before]", got)
+			}
+		})
+	}
+}
+
 func TestRunDescendantHoldingPTY(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

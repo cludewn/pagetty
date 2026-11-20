@@ -70,7 +70,16 @@ func terminalEOF(err error) bool {
 
 func wasInterrupted(state *os.ProcessState) bool {
 	status, ok := state.Sys().(syscall.WaitStatus)
-	return ok && status.Signaled()
+	if !ok || !status.Signaled() {
+		return false
+	}
+	// SIGKILLだけでは中断要求か判別できない。コンテキストの中断はRun側で反映する。
+	switch status.Signal() {
+	case syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP:
+		return true
+	default:
+		return false
+	}
 }
 
 func openInput(f *os.File) (*inputReader, error) {

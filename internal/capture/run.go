@@ -32,6 +32,7 @@ type Options struct {
 // Result はエラー時にも取得済みのDocumentを保持する。
 // 起動失敗はStarted=false、終了状態が得られなければExitCode=-1となる。
 // 対象の非0終了だけではRunのエラーにしない。
+// Interrupted は中断シグナルによる終了、または呼び出し元コンテキストの中断を示す。
 type Result struct {
 	Document    display.Document
 	Started     bool
