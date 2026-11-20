@@ -53,6 +53,8 @@ func runCLI(ctx context.Context, args []string, input *os.File, output, diagnost
 
 コマンドと引数はシェル展開せずに渡します。
 PTY行数は実端末から取得し、取得できなければ24行を使用します。
+Unixのパイプ・ファイル入力はcanonical modeのPTYへEOFを通知します。
+raw mode・EOF文字の無効化・転送中の端末モード変更は保証しません。
 Windowsの対話入力にはコンソールが必要です。リダイレクト入力は転送しません。
 中断・記録エラー時はpartial付きの名前で部分記録の保存を試みます。
 終了コード: 対象のコードを引継ぎ、引数不正2、ツール側失敗1、中断130。

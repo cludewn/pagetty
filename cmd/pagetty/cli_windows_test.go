@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -26,19 +27,27 @@ func TestCLIWindowsConsoleChild(t *testing.T) {
 	if err != nil {
 		os.Exit(10)
 	}
-	if mode == "ctrlc" {
+	timeout := 15 * time.Second
+	if mode == "deadline" {
+		timeout = 500 * time.Millisecond
+	}
+	if mode == "ctrlc" || mode == "deadline" {
 		mode = "block"
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	code := runCLI(ctx, cliArgs([]string{"--output-dir", dir}, mode), os.Stdin, os.Stdout, os.Stderr)
+	if err := ctx.Err(); err != nil {
+		fmt.Fprintf(os.Stderr, "CLI_CONTEXT_ERROR:%v\n", err)
+		os.Exit(11)
+	}
 	after, err := term.GetState(int(os.Stdin.Fd()))
 	fmt.Printf("\nCLI_RESULT:%d:restored=%t\n", code, err == nil && reflect.DeepEqual(before, after))
 	os.Exit(0)
 }
 
 func TestCLIWindowsInteractionAndCtrlC(t *testing.T) {
-	for _, mode := range []string{"interactive", "ctrlc", "size"} {
+	for _, mode := range []string{"interactive", "ctrlc", "size", "deadline"} {
 		t.Run(mode, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 			defer cancel()
@@ -83,6 +92,13 @@ func TestCLIWindowsInteractionAndCtrlC(t *testing.T) {
 			waitErr := xpty.WaitProcess(ctx, &exec.Cmd{Process: child})
 			closeErr := p.Close()
 			readErr := <-readDone
+			if mode == "deadline" {
+				var exitErr *exec.ExitError
+				if ctx.Err() != nil || closeErr != nil || readErr != nil || !errors.As(waitErr, &exitErr) || exitErr.ExitCode() != 11 || !strings.Contains(out.String(), "CLI_CONTEXT_ERROR:context deadline exceeded") || strings.Contains(out.String(), "CLI_RESULT:") {
+					t.Fatalf("deadline accepted: wait=%v close=%v read=%v output=%q", waitErr, closeErr, readErr, out.String())
+				}
+				return
+			}
 			if waitErr != nil || closeErr != nil || readErr != nil || len(out.responses) != 0 || !strings.Contains(out.String(), fmt.Sprintf("CLI_RESULT:%d:restored=true", wantCode)) {
 				t.Fatalf("wait=%v close=%v read=%v output=%q", waitErr, closeErr, readErr, out.String())
 			}
