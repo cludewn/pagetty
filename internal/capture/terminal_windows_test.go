@@ -61,6 +61,8 @@ func TestWindowsConsoleChild(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	command := windowsTestCommand("inner")
+	var output io.Writer = os.Stdout
+	var stalled *stalledOutput
 	switch mode {
 	case "ctrlc":
 		command = childCommand("block")
@@ -68,21 +70,36 @@ func TestWindowsConsoleChild(t *testing.T) {
 		command = childCommand("nonzero")
 	case "missing":
 		command = []string{"pagetty-nonexistent-command.exe"}
+	case "stalled output":
+		stalled = newStalledOutput("ready")
+		command, output = childCommand("block"), stalled
+		go func() {
+			select {
+			case <-stalled.entered:
+				cancel()
+			case <-ctx.Done():
+			}
+		}()
 	}
-	result, runErr := Run(ctx, command, Options{Columns: 40, Rows: 4, Input: os.Stdin, Output: os.Stdout})
+	result, runErr := Run(ctx, command, Options{Columns: 40, Rows: 4, Input: os.Stdin, Output: output})
 	after, stateErr := term.GetState(int(os.Stdin.Fd()))
 	afterCP, cpErr := windows.GetConsoleCP()
 	var afterOutputMode uint32
 	outputErr := windows.GetConsoleMode(windows.Handle(os.Stdout.Fd()), &afterOutputMode)
 	restored := stateErr == nil && cpErr == nil && outputErr == nil && reflect.DeepEqual(before, after) &&
 		codePage == afterCP && outputMode == afterOutputMode
+	if stalled != nil {
+		close(stalled.release)
+		<-stalled.finished
+		restored = restored && !stalled.closed.Load()
+	}
 	fmt.Printf("\nRESULT:%t:%d:%t:restored=%t:error=%t\n", result.Started, result.ExitCode, result.Interrupted, restored, runErr != nil)
 	fmt.Printf("RECORD:%s\n", strings.Join(rowTexts(result.Document), "|"))
 	os.Exit(0)
 }
 
 func TestWindowsConsoleInputAndRestore(t *testing.T) {
-	for _, mode := range []string{"interactive", "ctrlc", "nonzero", "missing"} {
+	for _, mode := range []string{"interactive", "ctrlc", "nonzero", "missing", "stalled output"} {
 		t.Run(mode, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
@@ -155,6 +172,10 @@ func TestWindowsConsoleInputAndRestore(t *testing.T) {
 			case "missing":
 				if !strings.Contains(text, "RESULT:false:-1:false:restored=true:error=true") {
 					t.Fatalf("start failure result: %q", text)
+				}
+			case "stalled output":
+				if !strings.Contains(text, ":true:restored=true:error=true") || !strings.Contains(text, "RECORD:ready") {
+					t.Fatalf("stalled output result: %q", text)
 				}
 			}
 		})

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/cludewn/pagetty/internal/display"
 )
 
@@ -147,5 +148,25 @@ func TestScreenStyledEraseAndConceal(t *testing.T) {
 	}
 	if doc.Rows[0].Cells[7].Style.Background != (display.Color{Kind: display.ColorIndexed, Index: 4}) {
 		t.Fatal("erased background lost")
+	}
+}
+
+func TestDisplayRowStorage(t *testing.T) {
+	for _, text := range []string{"", "x", "日e\u0301"} {
+		t.Run(text, func(t *testing.T) {
+			s := newScreen(200, 2)
+			defer s.terminal.Close()
+			_, _ = s.Write([]byte(text))
+			row, err := displayRow(200, func(x int) *uv.Cell { return s.terminal.CellAt(x, 0) })
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cap(row.Cells) != len(row.Cells) || (text == "" && row.Cells != nil) {
+				t.Fatalf("retained cell storage: len=%d cap=%d nil=%t", len(row.Cells), cap(row.Cells), row.Cells == nil)
+			}
+			if got := strings.Join(rowTexts(display.Document{Rows: []display.Row{row}}), ""); got != text {
+				t.Fatalf("text=%q, want %q", got, text)
+			}
+		})
 	}
 }

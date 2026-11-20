@@ -27,10 +27,7 @@ func newScreen(columns, rows int) *screen {
 }
 
 func (s *screen) Write(p []byte) (int, error) {
-	n, err := s.terminal.Write(p)
-	// 問い合わせは呼び出し元の端末にも届くため、仮想端末から二重に応答しない。
-	s.terminal.TakeResponses()
-	return n, err
+	return s.terminal.Write(p)
 }
 
 func (s *screen) document() (display.Document, error) {
@@ -102,6 +99,13 @@ func displayRow(columns int, at func(int) *uv.Cell) (display.Row, error) {
 			break
 		}
 		row.Cells = row.Cells[:len(row.Cells)-1]
+	}
+	if len(row.Cells) == 0 {
+		row.Cells = nil
+	} else if cap(row.Cells) > len(row.Cells) {
+		cells := make([]display.Cell, len(row.Cells))
+		copy(cells, row.Cells)
+		row.Cells = cells
 	}
 	return row, nil
 }

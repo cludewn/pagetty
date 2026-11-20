@@ -13,6 +13,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -47,6 +48,8 @@ func TestCaptureChild(t *testing.T) {
 		case "block":
 			fmt.Print("ready")
 			time.Sleep(time.Hour)
+		case "flood":
+			fmt.Print("ready" + strings.Repeat("z", 200000))
 		case "tail":
 			fmt.Print(strings.Repeat("x", 200000) + "END")
 		case "terminal":
@@ -233,5 +236,95 @@ func TestRunOutputFailureKeepsRecord(t *testing.T) {
 	result, err := Run(ctx, childCommand("block"), Options{Columns: 20, Rows: 3, Output: &brokenOutput{}})
 	if !errors.Is(err, io.ErrClosedPipe) || !strings.Contains(strings.Join(rowTexts(result.Document), ""), "ready") {
 		t.Fatalf("result=%+v err=%v", result, err)
+	}
+}
+
+type stalledOutput struct {
+	marker   string
+	seen     string
+	entered  chan struct{}
+	release  chan struct{}
+	finished chan struct{}
+	once     sync.Once
+	closed   atomic.Bool
+	mutated  atomic.Bool
+}
+
+func newStalledOutput(marker string) *stalledOutput {
+	return &stalledOutput{marker: marker, entered: make(chan struct{}), release: make(chan struct{}), finished: make(chan struct{})}
+}
+
+func (w *stalledOutput) Write(p []byte) (int, error) {
+	w.seen += string(p)
+	if strings.Contains(w.seen, w.marker) {
+		w.once.Do(func() {
+			expected := bytes.Clone(p)
+			close(w.entered)
+			<-w.release
+			w.mutated.Store(!bytes.Equal(p, expected))
+			close(w.finished)
+		})
+	}
+	return len(p), nil
+}
+
+func (w *stalledOutput) Close() error { w.closed.Store(true); return nil }
+
+func TestRunStalledOutput(t *testing.T) {
+	for _, mode := range []string{"exit", "cancel", "timeout"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			command, marker := childCommand("block"), "ready"
+			if mode == "exit" {
+				command, marker = childCommand("nonzero"), "before exit"
+			} else if mode == "timeout" {
+				command = childCommand("flood")
+			}
+			writer := newStalledOutput(marker)
+			type outcome struct {
+				result Result
+				err    error
+			}
+			done := make(chan outcome, 1)
+			go func() {
+				result, err := Run(ctx, command, Options{Columns: 40, Rows: 3, Output: writer})
+				done <- outcome{result, err}
+			}()
+			t.Cleanup(func() {
+				cancel()
+				close(writer.release)
+				select {
+				case <-writer.finished:
+					if writer.mutated.Load() {
+						t.Error("pending Write buffer changed after Run returned")
+					}
+				case <-time.After(2 * time.Second):
+					t.Error("writer did not finish after release")
+				}
+			})
+			select {
+			case <-writer.entered:
+			case <-ctx.Done():
+				t.Fatal("writer did not start")
+			}
+			limit := 7 * time.Second
+			if mode == "cancel" {
+				cancel()
+				limit = 2 * time.Second
+			}
+			select {
+			case got := <-done:
+				if got.err == nil || !got.result.Started || writer.closed.Load() ||
+					!strings.Contains(strings.Join(rowTexts(got.result.Document), ""), marker) {
+					t.Fatalf("started=%t closed=%t display=%q err=%v", got.result.Started, writer.closed.Load(), rowTexts(got.result.Document), got.err)
+				}
+				if mode == "cancel" && (!errors.Is(got.err, context.Canceled) || !got.result.Interrupted) {
+					t.Fatalf("cancel result=%+v err=%v", got.result, got.err)
+				}
+			case <-time.After(limit):
+				t.Fatal("Run blocked on caller-owned Output.Write")
+			}
+		})
 	}
 }

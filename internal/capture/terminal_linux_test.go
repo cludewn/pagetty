@@ -94,7 +94,7 @@ func TestRunInteractiveEchoAndRestore(t *testing.T) {
 }
 
 func TestParentTerminalRestoreOnFailure(t *testing.T) {
-	for _, mode := range []string{"nonzero", "missing", "cancel", "output failure"} {
+	for _, mode := range []string{"nonzero", "missing", "cancel", "output failure", "stalled output"} {
 		t.Run(mode, func(t *testing.T) {
 			master, slave, err := pty.Open()
 			if err != nil {
@@ -125,6 +125,24 @@ func TestParentTerminalRestoreOnFailure(t *testing.T) {
 				}()
 			case "output failure":
 				command, output = childCommand("block"), &brokenOutput{}
+			case "stalled output":
+				writer := newStalledOutput("ready")
+				command, output = childCommand("block"), writer
+				defer func() {
+					close(writer.release)
+					select {
+					case <-writer.finished:
+					case <-time.After(2 * time.Second):
+						t.Error("writer did not finish after release")
+					}
+				}()
+				go func() {
+					select {
+					case <-writer.entered:
+						cancel()
+					case <-ctx.Done():
+					}
+				}()
 			}
 			_, _ = Run(ctx, command, Options{Columns: 40, Rows: 3, Input: slave, Output: output})
 			after, err := term.GetState(int(slave.Fd()))
@@ -199,5 +217,108 @@ func TestRunDescendantHoldingPTY(t *testing.T) {
 	if err == nil || errors.Is(err, context.DeadlineExceeded) || !result.Started || result.ExitCode != 0 ||
 		!strings.Contains(strings.Join(rowTexts(result.Document), ""), "parent") {
 		t.Fatalf("result=%+v err=%v", result, err)
+	}
+}
+
+func TestTerminalQueryChild(t *testing.T) {
+	if len(os.Args) < 2 || os.Args[len(os.Args)-1] != "pagetty-query" {
+		return
+	}
+	if _, err := term.MakeRaw(0); err != nil {
+		os.Exit(10)
+	}
+	fmt.Print("before\x1b[6n")
+	reply, err := bufio.NewReader(os.Stdin).ReadString('R')
+	if err != nil {
+		os.Exit(11)
+	}
+	fmt.Printf("reply:%q", reply)
+	os.Exit(0)
+}
+
+func TestRunHeadlessQuery(t *testing.T) {
+	for _, mode := range []string{"no input", "buffer output", "terminal input", "pipe input", "terminal output without input"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			options := Options{Columns: 40, Rows: 3, Output: io.Discard}
+			switch mode {
+			case "buffer output":
+				options.Output = newObservedOutput()
+			case "terminal input", "terminal output without input":
+				master, slave, err := pty.Open()
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer master.Close()
+				defer slave.Close()
+				if mode == "terminal input" {
+					options.Input = slave
+				} else {
+					options.Output = slave
+				}
+			case "pipe input":
+				reader, writer, err := os.Pipe()
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer reader.Close()
+				defer writer.Close()
+				options.Input = reader
+			}
+			command := []string{os.Args[0], "-test.run=^TestTerminalQueryChild$", "--", "pagetty-query"}
+			result, err := Run(ctx, command, options)
+			if mode == "terminal output without input" {
+				if err == nil || !result.Started || !strings.Contains(strings.Join(rowTexts(result.Document), ""), "before") {
+					t.Fatalf("missing input result: started=%t display=%q err=%v", result.Started, rowTexts(result.Document), err)
+				}
+				return
+			}
+			if err != nil || !result.Started || result.ExitCode != 0 ||
+				strings.Join(rowTexts(result.Document), "") != `beforereply:"\x1b[1;7R"` {
+				t.Fatalf("exit=%d display=%q err=%v", result.ExitCode, rowTexts(result.Document), err)
+			}
+		})
+	}
+}
+
+func TestRunExternalQueryResponder(t *testing.T) {
+	for _, mode := range []string{"terminal file", "wrapped terminal"} {
+		t.Run(mode, func(t *testing.T) {
+			master, slave, err := pty.Open()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer master.Close()
+			defer slave.Close()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			out := newObservedOutput()
+			readDone := make(chan struct{})
+			go func() { _, _ = io.Copy(out, master); close(readDone) }()
+			var output io.Writer = slave
+			if mode == "wrapped terminal" {
+				output = struct{ io.Writer }{slave}
+			}
+			var result Result
+			var runErr error
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				command := []string{os.Args[0], "-test.run=^TestTerminalQueryChild$", "--", "pagetty-query"}
+				result, runErr = Run(ctx, command, Options{Columns: 40, Rows: 3, Input: slave, Output: output})
+			}()
+			out.wait(t, ctx, "\x1b[6n")
+			if _, err := io.WriteString(master, "\x1b[9;10R"); err != nil {
+				t.Fatal(err)
+			}
+			<-done
+			_ = slave.Close()
+			<-readDone
+			if runErr != nil || result.ExitCode != 0 ||
+				strings.Join(rowTexts(result.Document), "") != `beforereply:"\x1b[9;10R"` {
+				t.Fatalf("exit=%d display=%q err=%v", result.ExitCode, rowTexts(result.Document), runErr)
+			}
+		})
 	}
 }

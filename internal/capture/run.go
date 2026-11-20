@@ -2,6 +2,7 @@
 package capture
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -22,6 +23,10 @@ import (
 // Inputがnilなら入力を転送しない。端末なら実行中だけrawモードにする。
 // Windowsではコンソール入力のみ対応する。入力元のEOFをPTYのEOFへは変換しない。
 // Outputがnilなら呼び出し元の標準出力を使う。入出力先の所有権は呼び出し元に残る。
+// Writeが5秒を超えて停止した場合は転送を打ち切るが、進行中のWrite自体は終了できない。
+// 返却後のOutput再利用・解放は、呼び出し元でそのWriteと同期する必要がある。
+// 出力先を判別できないWriterでは、端末のInputがあれば二重応答を避けてホストに任せる。
+// 端末出力で端末のInputがない場合、問い合わせは応答を転送できないためエラーにする。
 type Options struct {
 	Columns int
 	Rows    int
@@ -115,8 +120,20 @@ func Run(ctx context.Context, command []string, options Options) (result Result,
 
 	s := newScreen(options.Columns, options.Rows)
 	defer func() { resultErr = errors.Join(resultErr, s.terminal.Close()) }()
+	f, isFile := options.Output.(*os.File)
+	terminalOutput := isFile && term.IsTerminal(int(f.Fd()))
+	terminalInput := options.Input != nil && term.IsTerminal(int(options.Input.Fd()))
+	var reply func([]byte) error
+	if !terminalInput || (isFile && !terminalOutput) || options.Output == io.Discard {
+		reply = func(data []byte) error {
+			if terminalOutput {
+				return errors.New("端末問い合わせに応答するには端末のInputが必要です")
+			}
+			return writeOutput(runCtx, p, data)
+		}
+	}
 	outputDone := make(chan error, 1)
-	go func() { outputDone <- copyOutput(reader, options.Output, s, cancel) }()
+	go func() { outputDone <- copyOutput(runCtx, reader, options.Output, s, reply, cancel) }()
 	inputDone := make(chan error, 1)
 	var inputStopped atomic.Bool
 	if input != nil {
@@ -145,6 +162,7 @@ func Run(ctx context.Context, command []string, options Options) (result Result,
 	case err = <-outputDone:
 	case <-timer.C:
 		resultErr = errors.New("終了後のPTY出力を回収できませんでした（部分記録）")
+		cancel()
 		_ = closePTY(p)
 		err = <-outputDone
 	}
@@ -172,7 +190,7 @@ func Run(ctx context.Context, command []string, options Options) (result Result,
 	return result, resultErr
 }
 
-func copyOutput(src io.Reader, dst io.Writer, s *screen, cancel context.CancelFunc) error {
+func copyOutput(ctx context.Context, src io.Reader, dst io.Writer, s *screen, reply func([]byte) error, cancel context.CancelFunc) error {
 	var resultErr error
 	forward := true
 	buf := make([]byte, 4096)
@@ -183,11 +201,15 @@ func copyOutput(src io.Reader, dst io.Writer, s *screen, cancel context.CancelFu
 				resultErr = errors.Join(resultErr, parseErr)
 				cancel()
 			}
-			if forward {
-				written, writeErr := dst.Write(buf[:n])
-				if writeErr == nil && written != n {
-					writeErr = io.ErrShortWrite
+			responses := s.terminal.TakeResponses()
+			if reply != nil && len(responses) > 0 {
+				if replyErr := reply(responses); replyErr != nil {
+					resultErr = errors.Join(resultErr, fmt.Errorf("端末問い合わせへの応答に失敗しました: %w", replyErr))
+					cancel()
 				}
+			}
+			if forward {
+				writeErr := writeOutput(ctx, dst, buf[:n])
 				if writeErr != nil {
 					resultErr = errors.Join(resultErr, fmt.Errorf("端末への出力に失敗しました: %w", writeErr))
 					forward = false
@@ -202,6 +224,32 @@ func copyOutput(src io.Reader, dst io.Writer, s *screen, cancel context.CancelFu
 			}
 			return resultErr
 		}
+	}
+}
+
+func writeOutput(ctx context.Context, dst io.Writer, p []byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// 停止したWriteが返却後も参照できるよう、記録側の再利用バッファと分離する。
+	data := bytes.Clone(p)
+	done := make(chan error, 1)
+	go func() {
+		n, err := dst.Write(data)
+		if err == nil && n != len(data) {
+			err = io.ErrShortWrite
+		}
+		done <- err
+	}()
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return fmt.Errorf("書き込みが停止しました（部分記録）: %w", context.DeadlineExceeded)
 	}
 }
 
