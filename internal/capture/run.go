@@ -25,7 +25,8 @@ import (
 // Outputがnilなら呼び出し元の標準出力を使う。入出力先の所有権は呼び出し元に残る。
 // Writeが5秒を超えて停止した場合は転送を打ち切るが、進行中のWrite自体は終了できない。
 // 返却後のOutput再利用・解放は、呼び出し元でそのWriteと同期する必要がある。
-// 出力先を判別できないWriterでは、端末のInputがあれば二重応答を避けてホストに任せる。
+// OutputはFd() uintptrが実端末を示す場合だけホスト応答を使う。ラッパーも同じ条件とする。
+// 非端末Writerでは仮想端末が応答する。
 // 端末出力で端末のInputがない場合、問い合わせは応答を転送できないためエラーにする。
 type Options struct {
 	Columns int
@@ -120,11 +121,11 @@ func Run(ctx context.Context, command []string, options Options) (result Result,
 
 	s := newScreen(options.Columns, options.Rows)
 	defer func() { resultErr = errors.Join(resultErr, s.terminal.Close()) }()
-	f, isFile := options.Output.(*os.File)
-	terminalOutput := isFile && term.IsTerminal(int(f.Fd()))
+	f, hasFD := options.Output.(interface{ Fd() uintptr })
+	terminalOutput := hasFD && term.IsTerminal(int(f.Fd()))
 	terminalInput := options.Input != nil && term.IsTerminal(int(options.Input.Fd()))
 	var reply func([]byte) error
-	if !terminalInput || (isFile && !terminalOutput) || options.Output == io.Discard {
+	if !terminalInput || !terminalOutput {
 		reply = func(data []byte) error {
 			if terminalOutput {
 				return errors.New("端末問い合わせに応答するには端末のInputが必要です")

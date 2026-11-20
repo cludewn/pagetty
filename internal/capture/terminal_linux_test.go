@@ -2,6 +2,7 @@ package capture
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -228,16 +229,22 @@ func TestTerminalQueryChild(t *testing.T) {
 		os.Exit(10)
 	}
 	fmt.Print("before\x1b[6n")
-	reply, err := bufio.NewReader(os.Stdin).ReadString('R')
+	reader := bufio.NewReader(os.Stdin)
+	reply, err := reader.ReadString('R')
 	if err != nil {
 		os.Exit(11)
 	}
 	fmt.Printf("reply:%q", reply)
+	ready, pollErr := unix.Poll([]unix.PollFd{{Fd: 0, Events: unix.POLLIN}}, 50)
+	if pollErr != nil || reader.Buffered() > 0 || ready > 0 {
+		fmt.Print("duplicate response")
+		os.Exit(12)
+	}
 	os.Exit(0)
 }
 
 func TestRunHeadlessQuery(t *testing.T) {
-	for _, mode := range []string{"no input", "buffer output", "terminal input", "pipe input", "terminal output without input"} {
+	for _, mode := range []string{"no input", "buffer output", "terminal input", "terminal input with bytes.Buffer", "terminal input with opaque writer", "pipe input", "terminal output without input"} {
 		t.Run(mode, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
@@ -245,15 +252,20 @@ func TestRunHeadlessQuery(t *testing.T) {
 			switch mode {
 			case "buffer output":
 				options.Output = newObservedOutput()
-			case "terminal input", "terminal output without input":
+			case "terminal input", "terminal input with bytes.Buffer", "terminal input with opaque writer", "terminal output without input":
 				master, slave, err := pty.Open()
 				if err != nil {
 					t.Fatal(err)
 				}
 				defer master.Close()
 				defer slave.Close()
-				if mode == "terminal input" {
+				if mode != "terminal output without input" {
 					options.Input = slave
+					if mode == "terminal input with bytes.Buffer" {
+						options.Output = new(bytes.Buffer)
+					} else if mode == "terminal input with opaque writer" {
+						options.Output = newObservedOutput()
+					}
 				} else {
 					options.Output = slave
 				}
@@ -266,6 +278,14 @@ func TestRunHeadlessQuery(t *testing.T) {
 				defer writer.Close()
 				options.Input = reader
 			}
+			var inputState *term.State
+			if options.Input != nil && term.IsTerminal(int(options.Input.Fd())) {
+				var stateErr error
+				inputState, stateErr = term.GetState(int(options.Input.Fd()))
+				if stateErr != nil {
+					t.Fatal(stateErr)
+				}
+			}
 			command := []string{os.Args[0], "-test.run=^TestTerminalQueryChild$", "--", "pagetty-query"}
 			result, err := Run(ctx, command, options)
 			if mode == "terminal output without input" {
@@ -273,6 +293,11 @@ func TestRunHeadlessQuery(t *testing.T) {
 					t.Fatalf("missing input result: started=%t display=%q err=%v", result.Started, rowTexts(result.Document), err)
 				}
 				return
+			}
+			if inputState != nil {
+				if state, stateErr := term.GetState(int(options.Input.Fd())); stateErr != nil || !reflect.DeepEqual(inputState, state) {
+					t.Fatalf("parent terminal mode not restored: state=%+v err=%v", state, stateErr)
+				}
 			}
 			if err != nil || !result.Started || result.ExitCode != 0 ||
 				strings.Join(rowTexts(result.Document), "") != `beforereply:"\x1b[1;7R"` {
@@ -298,7 +323,7 @@ func TestRunExternalQueryResponder(t *testing.T) {
 			go func() { _, _ = io.Copy(out, master); close(readDone) }()
 			var output io.Writer = slave
 			if mode == "wrapped terminal" {
-				output = struct{ io.Writer }{slave}
+				output = struct{ *os.File }{slave}
 			}
 			var result Result
 			var runErr error

@@ -70,6 +70,8 @@ func TestWindowsConsoleChild(t *testing.T) {
 		command = childCommand("nonzero")
 	case "missing":
 		command = []string{"pagetty-nonexistent-command.exe"}
+	case "wrapped output":
+		output = struct{ *os.File }{os.Stdout}
 	case "stalled output":
 		stalled = newStalledOutput("ready")
 		command, output = childCommand("block"), stalled
@@ -99,7 +101,7 @@ func TestWindowsConsoleChild(t *testing.T) {
 }
 
 func TestWindowsConsoleInputAndRestore(t *testing.T) {
-	for _, mode := range []string{"interactive", "ctrlc", "nonzero", "missing", "stalled output"} {
+	for _, mode := range []string{"interactive", "wrapped output", "ctrlc", "nonzero", "missing", "stalled output"} {
 		t.Run(mode, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
@@ -121,7 +123,7 @@ func TestWindowsConsoleInputAndRestore(t *testing.T) {
 				readDone <- err
 			}()
 			switch mode {
-			case "interactive":
+			case "interactive", "wrapped output":
 				for _, step := range []struct{ prompt, input string }{
 					{"first>", "日本語\r"}, {"hidden>", "hidden-token\r"}, {"third>", "omega\r"},
 				} {
@@ -155,7 +157,7 @@ func TestWindowsConsoleInputAndRestore(t *testing.T) {
 				t.Fatalf("console not restored: %q", text)
 			}
 			switch mode {
-			case "interactive":
+			case "interactive", "wrapped output":
 				if !strings.Contains(text, "RESULT:true:0:false:restored=true:error=false") ||
 					!strings.Contains(text, "RECORD:first>日本語|got:日本語|hidden>||length:12|third>omega|got:omega") ||
 					strings.Contains(text, "hidden-token") {
