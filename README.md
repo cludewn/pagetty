@@ -17,8 +17,8 @@ Windows 11では以前のビルドで実CLI・ConPTYの主要機能を確認し�
 
 - Windows：SHA256SUMSと、PowerShellの `Get-FileHash .\pagetty-windows-amd64.zip -Algorithm SHA256` の結果を照合します。
   ZIPを展開し、PowerShellで展開先へ移動して .\pagetty.exe として実行します。
-- Linux/WSL2：`grep -E '  pagetty-linux-amd64\.tar\.gz$' SHA256SUMS | sha256sum -c -` で照合し、`tar -xzf pagetty-linux-amd64.tar.gz` で展開します。
-  Linux版アーカイブとSHA256SUMSだけで照合できます。対象行欠落・形式不正・不一致はエラーになります。
+- Linux/WSL2：`grep -F '  pagetty-linux-amd64.tar.gz' SHA256SUMS | sha256sum --strict -c -` で照合し、`tar -xzf pagetty-linux-amd64.tar.gz` で展開します。
+  Linux版アーカイブとSHA256SUMSだけで照合できます。対象行の欠落・ハッシュ不一致に加え、抽出された行に形式不正が含まれる場合もエラーになります。
   展開先で ./pagetty として実行します。
 
 pagetty で起動したい場合は展開先をPATHに追加します。
