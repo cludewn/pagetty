@@ -38,6 +38,10 @@ func (f *loadedFont) path(text string) (glyphPath, error) {
 	x, y := int32(0), int32(0)
 	for i, info := range buffer.Info {
 		if info.Glyph == 0 {
+			// 未収録のクラスタだけを置換し、セル幅と属性は描画側に任せる。
+			if text != "□" {
+				return f.path("□")
+			}
 			return glyphPath{}, fmt.Errorf("font has no glyph for this text")
 		}
 		outline, ok := f.face.GlyphData(info.Glyph).(font.GlyphOutline)
