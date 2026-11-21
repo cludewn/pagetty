@@ -108,7 +108,7 @@ func TestCLIShellFileInput(t *testing.T) {
 						command = []string{"cmd.exe", "/d", "/c", "call", ".\\" + relative, "-test.run=^TestCLIChild$", "--", "pagetty-cli-child", "file-input", "<", inputName}
 					}
 				}
-				args := append([]string{"capture", "--format", format, "--max-lines", "1", "--output-dir", "images", "--"}, command...)
+				args := append([]string{"--format", format, "--max-lines", "1", "--output-dir", "images", "--"}, command...)
 				ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 				defer cancel()
 				cmd := exec.CommandContext(ctx, exe, append([]string{"-test.run=^TestCLIEntry$", "--", "pagetty-cli-entry"}, args...)...)

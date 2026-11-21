@@ -90,7 +90,7 @@ func TestCLIChild(t *testing.T) {
 }
 
 func cliArgs(options []string, mode string, args ...string) []string {
-	result := append([]string{"capture"}, options...)
+	result := append([]string(nil), options...)
 	result = append(result, "--")
 	return append(result, childArgs(mode, args...)...)
 }
@@ -105,16 +105,17 @@ func runTestCLI(t *testing.T, args []string) (int, string, string) {
 }
 
 func TestCLIHelpAndInvalidArguments(t *testing.T) {
-	for _, args := range [][]string{{"--help"}, {"-h"}, {"capture", "--help"}, {"capture", "-h"}} {
+	for _, args := range [][]string{{"--help"}, {"-h"}} {
 		code, output, diagnostics := runTestCLI(t, args)
-		if code != 0 || !strings.Contains(output, "pagetty capture") || diagnostics != "" {
+		if code != 0 || strings.Contains(output, "pagetty capture") || !strings.Contains(output, "pagetty [options] -- <command> [args...]") || !strings.Contains(output, "--format svg") || diagnostics != "" {
 			t.Fatalf("args=%q code=%d output=%q diagnostics=%q", args, code, output, diagnostics)
 		}
 	}
 	for _, args := range [][]string{
-		nil, {"unknown"}, {"--help", "extra"}, {"capture"}, {"capture", "--"},
-		{"capture", "echo", "bad"}, {"capture", "unexpected", "--", "echo"},
-		{"capture", "--unknown", "--", "echo"}, {"capture", "--columns", "x", "--", "echo"},
+		nil, {"echo", "text"}, {"--format", "svg", "echo"}, {"--help", "extra"},
+		{"--"}, {"--format", "svg", "--"}, {"--", ""}, {"unexpected", "--", "echo"},
+		{"capture", "--help"}, {"capture", "--", "echo"}, {"--help", "--", "echo"},
+		{"--unknown", "--", "echo"}, {"--columns", "--", "echo"}, {"--columns", "x", "--", "echo"},
 	} {
 		code, _, diagnostics := runTestCLI(t, args)
 		if code != 2 || diagnostics == "" {
@@ -239,7 +240,7 @@ func TestCLIDefaultDirectoryAndEmptyOutput(t *testing.T) {
 	}{
 		{[]string{"--help"}, 0},
 		{cliArgs(nil, "empty"), 0},
-		{[]string{"capture", "--", filepath.Join(dir, "missing-command")}, 1},
+		{[]string{"--", filepath.Join(dir, "missing-command")}, 1},
 	} {
 		code, _, diagnostics := runTestCLI(t, tc.args)
 		if code != tc.code {
@@ -380,7 +381,7 @@ func TestCLIProcessExitCode(t *testing.T) {
 	}{{"text", 0}, {"nonzero", 7}, {"invalid", 2}} {
 		args := cliArgs([]string{"--output-dir", t.TempDir()}, tc.mode)
 		if tc.mode == "invalid" {
-			args = []string{"capture", "--invalid"}
+			args = []string{"--invalid"}
 		}
 		exe, err := os.Executable()
 		if err != nil {
@@ -435,7 +436,7 @@ func (w *consoleResponder) Write(p []byte) (int, error) {
 }
 
 func TestCLIReportDefaults(t *testing.T) {
-	code, help, _ := runTestCLI(t, []string{"capture", "--help"})
+	code, help, _ := runTestCLI(t, []string{"--help"})
 	if code != 0 || !strings.Contains(help, "default 80") || !strings.Contains(help, "default 44") {
 		t.Fatalf("help: %s", help)
 	}

@@ -73,7 +73,7 @@ func TestCLIUnixInteractionAndCtrlC(t *testing.T) {
 
 func TestCLIUnixSignalExit(t *testing.T) {
 	dir := t.TempDir()
-	code, _, diagnostics := runTestCLI(t, []string{"capture", "--output-dir", dir, "--", "/bin/sh", "-c", "printf before; kill -KILL $$"})
+	code, _, diagnostics := runTestCLI(t, []string{"--output-dir", dir, "--", "/bin/sh", "-c", "printf before; kill -KILL $$"})
 	if code != 1 || !strings.Contains(diagnostics, "終了コードを取得できません") || len(imageFiles(t, dir, "png")) != 1 {
 		t.Fatalf("code=%d diagnostics=%q", code, diagnostics)
 	}
@@ -95,7 +95,7 @@ func TestCLIUnixProcessSignals(t *testing.T) {
 			if mode == "closed stdout" {
 				maxLines = "1"
 			}
-			args := []string{"capture", "--columns", "20", "--max-lines", maxLines, "--output-dir", dir, "--", "/bin/sh", "-c"}
+			args := []string{"--columns", "20", "--max-lines", maxLines, "--output-dir", dir, "--", "/bin/sh", "-c"}
 			script := "printf 'ready\\n'"
 			wantCode, wantPages := 0, 1
 			if mode == "child SIGPIPE" {
