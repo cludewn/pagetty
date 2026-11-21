@@ -39,8 +39,8 @@ func runCLI(ctx context.Context, args []string, input *os.File, output, diagnost
 	flags := flag.NewFlagSet("capture", flag.ContinueOnError)
 	flags.SetOutput(diagnostics)
 	format := flags.String("format", "png", "画像形式: png または svg")
-	columns := flags.Int("columns", 100, "端末の表示列数 (2〜32767、画像寸法の上限あり)")
-	maxLines := flags.Int("max-lines", 40, "画像1枚あたりの最大表示行数 (正の整数)")
+	columns := flags.Int("columns", 80, "端末の表示列数 (2〜32767、画像寸法の上限あり)")
+	maxLines := flags.Int("max-lines", 44, "画像1枚あたりの最大表示行数 (正の整数)")
 	outputDir := flags.String("output-dir", "./captures/", "起動元を基準とした画像保存先")
 	flags.Usage = func() {
 		flags.SetOutput(output)

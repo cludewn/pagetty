@@ -56,6 +56,8 @@ func TestCLIChild(t *testing.T) {
 			for i := range 5 {
 				fmt.Printf("line%d\n", i)
 			}
+		case "missing-glyph":
+			fmt.Print("A日éＡ\x1b[31;1m🚀\x1b[0mZ")
 		case "long":
 			for i := range 81 {
 				fmt.Printf("line%d\n", i)
@@ -207,7 +209,7 @@ func TestCLIFormatsWidthAndPages(t *testing.T) {
 		if i == 2 {
 			wantHeight = 60
 		}
-		if w != 1032 || h != wantHeight {
+		if w != 832 || h != wantHeight {
 			t.Fatalf("page=%d size=%dx%d", i, w, h)
 		}
 	}
@@ -256,20 +258,20 @@ func TestCLIDefaultDirectoryAndEmptyOutput(t *testing.T) {
 		t.Fatalf("code=%d paths=%v diagnostics=%q", code, paths, diagnostics)
 	}
 	w, h := readImage(t, paths[0])
-	if w != 1032 || h != 60 {
+	if w != 832 || h != 60 {
 		t.Fatalf("default size=%dx%d", w, h)
 	}
 	longDir := filepath.Join(dir, "long")
 	code, _, diagnostics = runTestCLI(t, cliArgs([]string{"--output-dir", longDir}, "long"))
 	paths = imageFiles(t, longDir, "png")
-	if code != 0 || len(paths) != 3 {
+	if code != 0 || len(paths) != 2 {
 		t.Fatalf("code=%d paths=%v diagnostics=%q", code, paths, diagnostics)
 	}
 	for i, path := range paths {
 		_, h := readImage(t, path)
-		want := 1152
-		if i == 2 {
-			want = 60
+		want := 32 + 44*28
+		if i == 1 {
+			want = 32 + 37*28
 		}
 		if h != want {
 			t.Fatalf("default max-lines: page=%d height=%d want=%d", i, h, want)
@@ -430,4 +432,20 @@ func (w *consoleResponder) Write(p []byte) (int, error) {
 		w.responses = w.responses[1:]
 	}
 	return n, nil
+}
+
+func TestCLIReportDefaults(t *testing.T) {
+	code, help, _ := runTestCLI(t, []string{"capture", "--help"})
+	if code != 0 || !strings.Contains(help, "default 80") || !strings.Contains(help, "default 44") {
+		t.Fatalf("help: %s", help)
+	}
+	for _, format := range []string{"png", "svg"} {
+		dir := t.TempDir()
+		code, _, d := runTestCLI(t, cliArgs([]string{"--format", format, "--output-dir", dir}, "missing-glyph"))
+		paths := imageFiles(t, dir, format)
+		if code != 0 || len(paths) != 1 {
+			t.Fatalf("fallback: %d %v %s", code, paths, d)
+		}
+		readImage(t, paths[0])
+	}
 }
