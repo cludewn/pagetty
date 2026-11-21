@@ -12,7 +12,7 @@ PageTTYは、ターミナルで実行したプログラムの表示をPNGやSVG�
 2. 展開先の`install.cmd`をダブルクリックします。
 3. ターミナルを閉じて開き直し、`pagetty --help`を実行します。見つからない場合は、Windowsにサインインし直してください。
 
-インストール先は`%LOCALAPPDATA%\PageTTY`です。更新するときは新しいZIPの`install.cmd`を実行します。削除するときは、展開先のフォルダーをPowerShellで開いて`.\install.cmd uninstall`を実行し、ターミナルを開き直します。
+インストール先は`%LOCALAPPDATA%\PageTTY`です。更新するときは新しいZIPの`install.cmd`を実行します。削除するときは、エクスプローラーで`%LOCALAPPDATA%\PageTTY`を開き、`uninstall.cmd`をダブルクリックして、ターミナルを開き直します。PATHを手動で編集した場合は、削除時に残った項目の確認を案内することがあります。
 
 ### Linux / WSL（x86-64、Bash）
 
@@ -25,7 +25,7 @@ cd pagetty-setup
 bash install.sh
 ~~~
 
-インストール先は`~/.local/share/pagetty`です。更新するときは新しく展開した`install.sh`を実行します。削除するときは、展開先で`bash install.sh uninstall`を実行し、ターミナルを開き直します。
+インストール先は`~/.local/share/pagetty`です。更新するときは新しく展開した`install.sh`を実行します。削除するときは、`bash ~/.local/share/pagetty/uninstall.sh`を実行し、ターミナルを開き直します。
 
 Bash以外のシェルや、Bashの起動設定を独自に管理している環境では、展開先の`./pagetty`を直接実行できます。
 
@@ -34,7 +34,7 @@ Bash以外のシェルや、Bashの起動設定を独自に管理している環
 ターミナルで次のコマンドを実行します。
 
 - Windows：`pagetty -- cmd.exe /d /c "echo Hello, PageTTY!"`
-- Linux / WSL：`pagetty -- printf 'Hello, PageTTY!\\n'`
+- Linux / WSL：`pagetty -- printf 'Hello, PageTTY!\n'`
 
 終了すると、現在のフォルダーの`captures/`にPNG画像ができます。保存先はターミナルにも表示されます。自分のプログラムを記録するときは、`--`の後に普段実行するコマンドを置きます。入力が求められたら、同じターミナルで入力してください。
 

@@ -1,120 +1,268 @@
 @echo off
 setlocal DisableDelayedExpansion
-set "PAGETTY_SOURCE=%~dp0"
-set "PAGETTY_MODE=%~1"
-"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command ^
-  "$ErrorActionPreference = 'Stop';" ^
-  "function Check-File($file) {" ^
-  "  $item = Get-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue;" ^
-  "  if ($item -and ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint))) { throw ('Unexpected file: ' + $file) }" ^
-  "}" ^
-  "function Save-State($first, $last, $pathMode) {" ^
-  "  [IO.File]::WriteAllLines($recordStage, [string[]]@($first, $last, $pathMode));" ^
-  "  if ([IO.File]::Exists($record)) { [IO.File]::Replace($recordStage, $record, [NullString]::Value) }" ^
-  "  else { [IO.File]::Move($recordStage, $record) }" ^
-  "}" ^
-  "function Notify-PathChange {" ^
-  "  try {" ^
-  "    $q = [char]34;" ^
-  "    $signature = '[DllImport(' + $q + 'user32.dll' + $q + ', CharSet=CharSet.Unicode)] public static extern IntPtr SendMessageTimeout(IntPtr hwnd, uint msg, UIntPtr w, string l, uint flags, uint ms, out UIntPtr result);';" ^
-  "    Add-Type -Namespace PageTTY -Name Native -MemberDefinition $signature;" ^
-  "    $result = [UIntPtr]::Zero;" ^
-  "    $sent = [PageTTY.Native]::SendMessageTimeout([IntPtr]0xffff, 0x1a, [UIntPtr]::Zero, 'Environment', 2, 1000, [ref]$result);" ^
-  "    if ($sent -eq [IntPtr]::Zero) { Write-Warning 'If PATH is stale, sign out and back in.' }" ^
-  "  } catch { Write-Warning 'If PATH is stale, sign out and back in.' }" ^
-  "}" ^
-  "try {" ^
-  "  $mode = $env:PAGETTY_MODE;" ^
-  "  if ($mode -and $mode -ne 'uninstall') { throw 'Use: install.cmd [uninstall]' }" ^
-  "  $local = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData);" ^
-  "  if (!$local -or $local.Contains(';') -or $local.Contains([char]37)) { throw 'Unsupported LocalAppData path.' }" ^
-  "  $dir = Join-Path $local 'PageTTY';" ^
-  "  $bin = Join-Path $dir 'pagetty.exe';" ^
-  "  $record = Join-Path $dir '.pagetty-install';" ^
-  "  $docs = @('LICENSE', 'THIRD_PARTY_NOTICES.txt');" ^
-  "  $first = 'pending'; $pathMode = 'none';" ^
-  "  if ($mode -ne 'uninstall') {" ^
-  "    $src = Join-Path $env:PAGETTY_SOURCE 'pagetty.exe';" ^
-  "    foreach ($file in @('pagetty.exe') + $docs) {" ^
-  "      if (![IO.File]::Exists((Join-Path $env:PAGETTY_SOURCE $file))) { throw 'Extract the Windows ZIP before running install.cmd.' }" ^
-  "    }" ^
-  "  }" ^
-  "  $item = Get-Item -LiteralPath $dir -Force -ErrorAction SilentlyContinue;" ^
-  "  if ($item) {" ^
-  "    if (!$item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or ![IO.File]::Exists($record)) { throw ('Installation directory already exists and is not managed: ' + $dir) }" ^
-  "    Check-File $record; Check-File $bin;" ^
-  "    $saved = [IO.File]::ReadAllLines($record);" ^
-  "    if ($saved.Length -ne 3 -or $saved[0] -notmatch '^(pending|[0-9a-f]{64})$' -or $saved[1] -notmatch '^[0-9a-f]{64}$' -or $saved[2] -notin @('none','absent','empty','append')) { throw 'Invalid installation record.' }" ^
-  "    $pathMode = $saved[2];" ^
-  "    if ([IO.File]::Exists($bin)) {" ^
-  "      $first = (Get-FileHash -LiteralPath $bin -Algorithm SHA256).Hash;" ^
-  "      if ($first -notin $saved[0..1]) { throw ('Existing executable was not installed by this installer: ' + $bin) }" ^
-  "    }" ^
-  "    foreach ($doc in $docs) { Check-File (Join-Path $dir $doc) }" ^
-  "  } elseif ($mode -eq 'uninstall') { Write-Host 'PageTTY is not installed.'; exit 0 }" ^
-  "  $reg = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment');" ^
-  "  $hadPath = $reg.GetValueNames() -contains 'Path';" ^
-  "  $kind = [Microsoft.Win32.RegistryValueKind]::String;" ^
-  "  $raw = '';" ^
-  "  if ($hadPath) {" ^
-  "    $kind = $reg.GetValueKind('Path');" ^
-  "    if ($kind -notin @('String','ExpandString')) { throw 'The user Path has an unsupported registry type.' }" ^
-  "    $raw = $reg.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames);" ^
-  "  }" ^
-  "  $entries = $raw.Split(';');" ^
-  "  $changed = $false;" ^
-  "  if ($mode -eq 'uninstall') {" ^
-  "    if ($pathMode -ne 'none') {" ^
-  "      for ($i = $entries.Length - 1; $i -ge 0; $i--) {" ^
-  "        if ($entries[$i] -cne $dir) { continue }" ^
-  "        $newPath = (@(for ($j = 0; $j -lt $entries.Length; $j++) { if ($j -ne $i) { $entries[$j] } }) -join ';');" ^
-  "        if ($entries.Length -eq 1 -and $pathMode -eq 'absent') { $reg.DeleteValue('Path') }" ^
-  "        else { $reg.SetValue('Path', $newPath, $kind) }" ^
-  "        $changed = $true; break;" ^
-  "      }" ^
-  "    }" ^
-  "    foreach ($file in @($bin) + @($docs | ForEach-Object { Join-Path $dir $_ })) { [IO.File]::Delete($file) }" ^
-  "    [IO.File]::Delete($record);" ^
-  "    if (![IO.Directory]::GetFileSystemEntries($dir).Length) { [IO.Directory]::Delete($dir) }" ^
-  "    Write-Host 'PageTTY removed.';" ^
-  "  } else {" ^
-  "    $existing = $raw;" ^
-  "    if ($kind -eq 'ExpandString') { $existing = [Environment]::ExpandEnvironmentVariables($raw) }" ^
-  "    $machine = [Environment]::GetEnvironmentVariable('Path', 'Machine');" ^
-  "    if ($machine) { $existing += ';' + $machine }" ^
-  "    $matched = $false;" ^
-  "    foreach ($entry in $existing.Split(';')) {" ^
-  "      $candidate = $entry.Trim().Trim([char]34).Replace('/', '\').TrimEnd('\');" ^
-  "      if ($candidate -ieq $dir) { $matched = $true; break }" ^
-  "    }" ^
-  "    if (!$matched) {" ^
-  "      $pathMode = if (!$hadPath) { 'absent' } elseif (!$raw) { 'empty' } else { 'append' };" ^
-  "      $newPath = if ($raw) { $raw + ';' + $dir } else { $dir };" ^
-  "      if ($newPath.Length -ge 32767) { throw 'The resulting user Path is too long.' }" ^
-  "    }" ^
-  "    $last = (Get-FileHash -LiteralPath $src -Algorithm SHA256).Hash;" ^
-  "    if (!$item) { [IO.Directory]::CreateDirectory($dir) | Out-Null }" ^
-  "    $stage = Join-Path $dir ([IO.Path]::GetRandomFileName());" ^
-  "    $recordStage = Join-Path $dir ([IO.Path]::GetRandomFileName());" ^
-  "    try {" ^
-  "      Save-State $first $last $pathMode;" ^
-  "      [IO.File]::Copy($src, $stage);" ^
-  "      if ([IO.File]::Exists($bin)) { [IO.File]::Replace($stage, $bin, [NullString]::Value) }" ^
-  "      else { [IO.File]::Move($stage, $bin) }" ^
-  "      foreach ($doc in $docs) { [IO.File]::Copy((Join-Path $env:PAGETTY_SOURCE $doc), (Join-Path $dir $doc), $true) }" ^
-  "    } finally { [IO.File]::Delete($stage); [IO.File]::Delete($recordStage) }" ^
-  "    if (!$matched) { $reg.SetValue('Path', $newPath, $kind); $changed = $true }" ^
-  "    Write-Host ('Installed: ' + $bin);" ^
-  "  }" ^
-  "  $reg.Dispose();" ^
-  "  if ($changed) { Notify-PathChange }" ^
-  "  Write-Host 'Close and reopen your terminal. If PATH is stale, sign out and back in.';" ^
-  "  if ($mode -ne 'uninstall') { Write-Host 'Try: pagetty --help' }" ^
-  "} catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }"
-if errorlevel 1 goto failed
+set "PAGETTY_SETUP=%~f0"
+set "PAGETTY_UNINSTALL="
+if /i "%~nx0"=="uninstall.cmd" set "PAGETTY_UNINSTALL=1"
+set "PAGETTY_COMMAND=$status = 0; try { $text = [IO.File]::ReadAllText($env:PAGETTY_SETUP); $marker = [char]10 + ':payload'; $offset = $text.IndexOf($marker); if ($offset -lt 0) { throw 'Setup payload is missing.' }; & ([scriptblock]::Create($text.Substring($offset + $marker.Length))) } catch { [Console]::Error.WriteLine($_.Exception.Message); $status = 1 }; if ($env:PAGETTY_UNINSTALL -eq '1') { try { $null = Read-Host 'Press Enter to close' } catch {} }; exit $status"
+if defined PAGETTY_UNINSTALL (
+    start "PageTTY uninstall" /d "%SystemRoot%" "%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -Command "%PAGETTY_COMMAND%"
+    if errorlevel 1 (
+        echo Could not open the PageTTY uninstall window.
+        pause
+        exit /b 1
+    )
+    exit /b 0
+)
+"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command "%PAGETTY_COMMAND%"
+if errorlevel 1 (
+    echo PageTTY setup failed.
+    pause
+    exit /b 1
+)
 pause
 exit /b 0
-:failed
-echo PageTTY setup failed.
-pause
-exit /b 1
+:payload
+$ErrorActionPreference = 'Stop'
+$payload = @('pagetty.exe', 'LICENSE', 'THIRD_PARTY_NOTICES.txt', 'uninstall.cmd')
+$record = '.pagetty-install'
+
+function Get-Entry($path) {
+    try { Get-Item -LiteralPath $path -Force -ErrorAction Stop }
+    catch [System.Management.Automation.ItemNotFoundException] {}
+}
+
+function Assert-PlainFile($path) {
+    $item = Get-Entry $path
+    if (!$item -or $item.PSIsContainer -or ($item.Attributes -band ([IO.FileAttributes]::ReparsePoint -bor [IO.FileAttributes]::ReadOnly))) {
+        throw "Missing or unsafe file: $path"
+    }
+}
+
+function Read-Path($key) {
+    if ($key.GetValueNames() -notcontains 'Path') { return @{ Kind = 'Absent'; Raw = '' } }
+    $kind = [string]$key.GetValueKind('Path')
+    if ($kind -notin @('String','ExpandString')) { throw 'Unsupported user Path registry type.' }
+    @{ Kind = $kind; Raw = $key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) }
+}
+
+function Write-Path($key, $value) {
+    if ($value.Kind -eq 'Absent') { $key.DeleteValue('Path', $false) }
+    else { $key.SetValue('Path', $value.Raw, [Microsoft.Win32.RegistryValueKind]$value.Kind) }
+}
+
+function Get-PathHash($value) {
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [Text.Encoding]::Unicode.GetBytes($value.Kind + [char]10 + $value.Raw)
+        [BitConverter]::ToString($sha.ComputeHash($bytes)).Replace('-', '')
+    } finally { $sha.Dispose() }
+}
+
+function Get-PathPlan($before, [string]$effective, $dir, $ownership, [bool]$uninstall) {
+    $plan = @{ Value = $before; Change = $false; Ownership = $ownership; Manual = $false }
+    if ($uninstall) {
+        if (!$ownership) { return $plan }
+        $entries = $before.Raw.Split(';')
+        $matches = @($entries | Where-Object { $_ -ieq $dir })
+        if ($ownership.Hash -cne (Get-PathHash $before) -or $matches.Count -ne 1 -or $entries[-1] -cne $dir) {
+            $plan.Manual = $true
+            return $plan
+        }
+        $previous = $before.Raw.Substring(0, [Math]::Max(0, $before.Raw.Length - $dir.Length - 1))
+        $plan.Value = @{ Kind = $ownership.Kind; Raw = $previous }
+    } else {
+        foreach ($entry in $effective.Split(';') + $before.Raw.Split(';')) {
+            $candidate = $entry.Trim().Trim([char]34).Replace('/', '\').TrimEnd('\')
+            if ($candidate -ieq $dir) { return $plan }
+        }
+        $combined = if ($effective) { "$effective;$dir" } else { $dir }
+        if ($combined.Length -gt 8191) {
+            throw "The expanded system + user PATH would exceed cmd.exe's 8191-character limit. PATH was not changed."
+        }
+        $raw = if ($before.Raw) { $before.Raw + ';' + $dir } else { $dir }
+        if ($raw.Length -gt 32767) { throw 'The user Path would exceed the Windows environment limit.' }
+        $kind = if ($before.Kind -eq 'Absent') { 'String' } else { $before.Kind }
+        $plan.Value = @{ Kind = $kind; Raw = $raw }
+        $plan.Ownership = @{ Kind = $before.Kind; Hash = (Get-PathHash $plan.Value) }
+    }
+    $plan.Change = $true
+    $plan
+}
+
+function Get-InstalledState($dir) {
+    $item = Get-Entry $dir
+    if (!$item) { return }
+    if (!$item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw "Unsafe installation directory: $dir"
+    }
+    if ([IO.Directory]::GetFileSystemEntries($dir).Length -ne $payload.Count + 1) {
+        throw "Unexpected files in $dir"
+    }
+    $path = Join-Path $dir $record
+    Assert-PlainFile $path
+    $state = [IO.File]::ReadAllText($path) | ConvertFrom-Json
+    if ($state.Version -ne 1 -or @($state.Files.PSObject.Properties).Count -ne $payload.Count) {
+        throw "Unknown installation record: $path"
+    }
+    foreach ($name in $payload) {
+        $path = Join-Path $dir $name
+        Assert-PlainFile $path
+        $expected = $state.Files.PSObject.Properties[$name]
+        if (!$expected -or $expected.Value -cne (Get-FileHash -LiteralPath $path).Hash) {
+            throw "Managed file has changed: $path"
+        }
+    }
+    if ($state.Path -and ($state.Path.Kind -notin @('Absent','String','ExpandString') -or
+        $state.Path.Hash -cnotmatch '^[0-9A-F]{64}$')) { throw 'Invalid PATH ownership record.' }
+    $state
+}
+
+function Copy-PayloadFile($from, $to) { [IO.File]::Copy($from, $to) }
+function Save-Record($file, $state) {
+    [IO.File]::WriteAllText($file, (ConvertTo-Json -InputObject $state -Depth 4 -Compress))
+}
+function Move-Payload($from, $to) { [IO.Directory]::Move($from, $to) }
+function Clear-Payload($path) {
+    if (![IO.Directory]::Exists($path)) { return }
+    foreach ($name in $payload + $record) { [IO.File]::Delete((Join-Path $path $name)) }
+    [IO.Directory]::Delete($path)
+}
+
+function Invoke-PageTTYSetup($root, $source, $launcher, $key, $effective, [bool]$uninstall) {
+    $dir = Join-Path $root 'PageTTY'
+    $work = Join-Path $root 'PageTTY.setup'
+    $stage = Join-Path $work 'new'
+    $backup = Join-Path $work 'old'
+    if (Get-Entry $work) { throw "Another setup is active or recovery is needed: $work" }
+    New-Item -Path $work -ItemType Directory -ErrorAction Stop | Out-Null
+    $keepWork = $false
+    $movedOld = $false
+    $placedNew = $false
+    $attemptedPath = $false
+    try {
+        $state = Get-InstalledState $dir
+        if (!$state -and $uninstall) { Write-Host 'PageTTY is not installed.'; return }
+        $before = Read-Path $key
+        if (!$uninstall -and $null -eq $effective) { $effective = Read-EffectivePath }
+        $plan = Get-PathPlan $before $effective $dir $state.Path $uninstall
+        if (!$uninstall) {
+            $sources = @{}
+            foreach ($name in $payload) {
+                $file = if ($name -eq 'uninstall.cmd') { $launcher } else { Join-Path $source $name }
+                Assert-PlainFile $file
+                $sources[$name] = $file
+            }
+            [IO.Directory]::CreateDirectory($stage) | Out-Null
+            $hashes = @{}
+            foreach ($name in $payload) {
+                $target = Join-Path $stage $name
+                Copy-PayloadFile $sources[$name] $target
+                $hashes[$name] = (Get-FileHash -LiteralPath $target).Hash
+            }
+            Save-Record (Join-Path $stage $record) @{ Version = 1; Files = $hashes; Path = $plan.Ownership }
+        }
+        if ($state) {
+            $null = Get-InstalledState $dir
+            Move-Payload $dir $backup
+            $movedOld = $true
+        }
+        if (!$uninstall) {
+            Move-Payload $stage $dir
+            $placedNew = $true
+        }
+        if ($plan.Change) {
+            if ((Get-PathHash (Read-Path $key)) -cne (Get-PathHash $before)) {
+                throw 'User PATH changed during setup. Retry the operation.'
+            }
+            $attemptedPath = $true
+            Write-Path $key $plan.Value
+        }
+    } catch {
+        $failure = $_
+        $restoreErrors = @()
+        if ($attemptedPath) {
+            try {
+                $current = Get-PathHash (Read-Path $key)
+                if ($current -ceq (Get-PathHash $plan.Value)) { Write-Path $key $before }
+                elseif ($current -cne (Get-PathHash $before)) { throw 'PATH changed again and was left untouched.' }
+            } catch { $restoreErrors += "PATH: $($_.Exception.Message)" }
+        }
+        try {
+            if ($placedNew) { Move-Payload $dir $stage }
+            if ($movedOld) { Move-Payload $backup $dir }
+        } catch { $restoreErrors += "Files: $($_.Exception.Message)" }
+        if ($restoreErrors.Count) {
+            $keepWork = $true
+            throw "$($failure.Exception.Message) Rollback incomplete. Recovery directory: $work. $($restoreErrors -join ' ')"
+        }
+        throw $failure
+    } finally {
+        if (!$keepWork) {
+            try {
+                Clear-Payload $stage
+                if ($movedOld -and [IO.Directory]::Exists($backup)) { $null = Get-InstalledState $backup }
+                Clear-Payload $backup
+                [IO.Directory]::Delete($work)
+            } catch { throw "Could not remove setup files in $work. Inspect before retrying. $($_.Exception.Message)" }
+        }
+    }
+    if ($plan.Manual) {
+        Write-Warning "User PATH changed since setup and was left untouched. In user Environment Variables, review the PageTTY entry: $dir"
+    }
+    if ($uninstall) { Write-Host 'PageTTY removed.' }
+    else { Write-Host "Installed: $dir\pagetty.exe"; Write-Host 'Try: pagetty --help' }
+    return $plan.Change
+}
+
+function Initialize-Native {
+    Add-Type -Namespace PageTTY -Name Native -MemberDefinition @(
+        '[DllImport("userenv.dll", SetLastError=true)] public static extern bool CreateEnvironmentBlock(out IntPtr block, IntPtr token, bool inherit);'
+        '[DllImport("userenv.dll")] public static extern bool DestroyEnvironmentBlock(IntPtr block);'
+        '[DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern IntPtr SendMessageTimeout(IntPtr h, uint m, UIntPtr w, string l, uint f, uint ms, out UIntPtr result);'
+    )
+}
+
+function Read-EffectivePath {
+    # The fresh Windows user environment combines and expands the stored paths.
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $block = [IntPtr]::Zero
+    try {
+        if (![PageTTY.Native]::CreateEnvironmentBlock([ref]$block, $identity.Token, $false)) {
+            throw 'Could not read the combined Windows PATH.'
+        }
+        $p = $block
+        while ($line = [Runtime.InteropServices.Marshal]::PtrToStringUni($p)) {
+            if ($line.StartsWith('Path=', [StringComparison]::OrdinalIgnoreCase)) { return $line.Substring(5) }
+            $p = [IntPtr]::Add($p, ($line.Length + 1) * 2)
+        }
+        return ''
+    } finally {
+        if ($block -ne [IntPtr]::Zero) { [void][PageTTY.Native]::DestroyEnvironmentBlock($block) }
+        $identity.Dispose()
+    }
+}
+
+# Command entry point
+$root = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
+if (!$root -or $root -match '[;%]') { throw 'Unsupported LocalAppData location.' }
+for ($item = Get-Item -LiteralPath $root -Force; $item; $item = $item.Parent) {
+    if (!$item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw "Unsafe installation path: $($item.FullName)"
+    }
+}
+$uninstall = $env:PAGETTY_UNINSTALL -eq '1'
+if (!$uninstall) { Initialize-Native }
+$key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+if (!$key) { throw 'Cannot open the user Environment registry key for writing.' }
+try {
+    $changed = Invoke-PageTTYSetup $root ([IO.Path]::GetDirectoryName($env:PAGETTY_SETUP)) $env:PAGETTY_SETUP $key $null $uninstall
+} finally { $key.Dispose() }
+if ($changed) {
+    try {
+        if ($uninstall) { Initialize-Native }
+        $result = [UIntPtr]::Zero
+        $sent = [PageTTY.Native]::SendMessageTimeout([IntPtr]0xffff, 0x1a, [UIntPtr]::Zero, 'Environment', 2, 1000, [ref]$result)
+        if ($sent -eq [IntPtr]::Zero) { Write-Warning 'Windows did not confirm the PATH refresh.' }
+    } catch { Write-Warning 'Windows did not confirm the PATH refresh.' }
+}
+Write-Host 'Close and reopen your terminal. If PATH is stale, sign out and back in.'
