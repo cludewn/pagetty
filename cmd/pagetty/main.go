@@ -1,11 +1,11 @@
 package main
 
 import (
-	"fmt"
+	"context"
 	"os"
 )
 
 func main() {
-	fmt.Fprintln(os.Stderr, "pagetty: 機能は未実装です")
-	os.Exit(1)
+	preventBrokenPipeExit()
+	os.Exit(runCLI(context.Background(), os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
 }
