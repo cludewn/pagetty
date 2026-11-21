@@ -14,10 +14,11 @@ import zipfile
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output-dir", default=".local/dist", help="新規の出力フォルダ（既存は拒否）")
+    parser.add_argument("--output-dir", default=".local/dist", help="新規の出力フォルダ（既存は拒否）。リポジトリ内ではGit除外済みのディレクトリを使用してください。")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
-    version = subprocess.check_output(["go", "env", "GOVERSION"], text=True).strip()
+    go_env = dict(os.environ, GOWORK="off")
+    version = subprocess.check_output(["go", "env", "GOVERSION"], cwd=root, env=go_env, text=True).strip()
     if version != "go1.27.4":
         parser.error("通知の監査対象はgo1.27.4です。対応するGoを使用するか、通知を再確認してください。")
     out = Path(args.output_dir).resolve()
@@ -29,7 +30,7 @@ def main():
             ("linux", "pagetty", ".tar.gz"),
         ]:
             binary = Path(work) / executable
-            env = dict(os.environ, GOOS=target, GOARCH="amd64", GOAMD64="v1",
+            env = dict(go_env, GOOS=target, GOARCH="amd64", GOAMD64="v1",
                        CGO_ENABLED="0", GOFLAGS="-mod=readonly", GOEXPERIMENT="")
             subprocess.run(["go", "build", "-trimpath", "-buildvcs=false", "-o", str(binary),
                             "./cmd/pagetty"], cwd=root, env=env, check=True)

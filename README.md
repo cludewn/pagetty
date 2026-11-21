@@ -7,7 +7,9 @@
 ## 対応環境とインストール
 
 初期配布対象はWindows amd64（64ビットx86）のZIPとLinux amd64のtar.gzです。
-Linux版はWSL2でも利用できます。確認済み環境はWindows 11とUbuntu 24.04のWSL2です。
+Linux版はUbuntu 24.04のWSL2で実行確認済みです。
+Windows 11では以前のビルドで実CLI・ConPTYの主要機能を確認しました。
+今回の配布候補はWindows amd64向けクロスビルドとアーカイブ検証までで、最終候補exeのWindows上での実行は未検証です。
 独立したLinux実機や他のOS・CPUは未検証です。
 
 配布アーカイブは[GitHub Releases](https://github.com/cludewn/pagetty/releases)から取得します。
@@ -15,12 +17,13 @@ Linux版はWSL2でも利用できます。確認済み環境はWindows 11とUbun
 
 - Windows：SHA256SUMSと、PowerShellの `Get-FileHash .\pagetty-windows-amd64.zip -Algorithm SHA256` の結果を照合します。
   ZIPを展開し、PowerShellで展開先へ移動して .\pagetty.exe として実行します。
-- Linux/WSL2：`sha256sum -c SHA256SUMS` で照合し、`tar -xzf pagetty-linux-amd64.tar.gz` で展開します。
+- Linux/WSL2：`grep -E '  pagetty-linux-amd64\.tar\.gz$' SHA256SUMS | sha256sum -c -` で照合し、`tar -xzf pagetty-linux-amd64.tar.gz` で展開します。
+  Linux版アーカイブとSHA256SUMSだけで照合できます。対象行欠落・形式不正・不一致はエラーになります。
   展開先で ./pagetty として実行します。
 
 pagetty で起動したい場合は展開先をPATHに追加します。
 Go、画像レンダラー、フォントの別途インストールは不要ですが、対象のPython等の処理系は必要です。
-Windowsではセキュリティ製品が承認を要求する場合があります。配布元・対象ファイルと検知内容を確認してください。
+警告が出た場合は配布元・対象ファイルと検知内容を確認してください。
 
 ## 基本操作
 
@@ -80,6 +83,8 @@ pagetty capture -- cmd.exe /d /c ".\a.exe < input.txt"
 ファイルから読み取った入力値は、対象プログラムが画面へ出力しない限り画像には表示されません。
 
 ## 既知の制約
+
+- Windowsでは断続的な起動拒否が発生し、原因は未確定です。ウイルスバスター クラウドの承認要求も繰り返し発生していますが、起動拒否の原因と断定できる証拠はありません。
 
 - 画像は端末表示の再描画です。OS画面そのもののスクリーンショットではありません。
 - 同梱BIZ UDGothicにない文字・絵文字等は、表示クラスタ単位で□に置き換えます。
