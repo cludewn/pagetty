@@ -243,7 +243,6 @@ func TestRenderErrors(t *testing.T) {
 		{"two graphemes", display.Cell{Text: "AB", Width: 1}},
 		{"bad foreground", display.Cell{Text: "A", Width: 1, Style: display.Style{Foreground: display.Color{Kind: 3}}}},
 		{"bad background", display.Cell{Text: "A", Width: 1, Style: display.Style{Background: display.Color{Kind: 3}}}},
-		{"missing glyph on later page", display.Cell{Text: "😀", Width: 2}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			doc := display.Document{Columns: 2, Rows: []display.Row{{Cells: []display.Cell{valid}}, {Cells: []display.Cell{tt.cell}}}}
@@ -309,3 +308,53 @@ func decodePNG(t *testing.T, result Image) image.Image {
 }
 
 func rgba(c color.Color) color.RGBA { return color.RGBAModel.Convert(c).(color.RGBA) }
+
+func TestRenderMissingGlyph(t *testing.T) {
+	for _, bold := range []bool{false, true} {
+		fontData := regularFont
+		if bold {
+			fontData = boldFont
+		}
+		f, err := loadFont(fontData)
+		if err != nil {
+			t.Fatal(err)
+		}
+		box, err := f.path("□")
+		if err != nil || box.data == "" {
+			t.Fatalf("replacement glyph: %+v %v", box, err)
+		}
+		for _, width := range []int{1, 2} {
+			for _, format := range []Format{PNG, SVG} {
+				style := display.Style{Bold: bold, Italic: true, Underline: true, Strikethrough: true, Inverse: true, Faint: true,
+					Foreground: display.Color{Kind: display.ColorRGB, R: 210, G: 100, B: 40},
+					Background: display.Color{Kind: display.ColorIndexed, Index: 4}}
+				doc := display.Document{Columns: 8, Rows: []display.Row{
+					{Cells: []display.Cell{{Text: "A", Width: 1}, {Text: "日", Width: 2}, {Text: "é", Width: 1}, {Text: "Ａ", Width: 2}}},
+					{Cells: []display.Cell{{Text: "🚀", Width: width, Style: style}, {Text: "|", Width: 1}}},
+				}}
+				before := fmt.Sprintf("%#v", doc)
+				got, err := Render(doc, Options{MaxLines: 1, Format: format})
+				if err != nil || len(got) != 2 {
+					t.Fatalf("missing glyph: %v", err)
+				}
+				if fmt.Sprintf("%#v", doc) != before {
+					t.Fatal("input changed")
+				}
+				expected := doc
+				expected.Rows = append([]display.Row(nil), doc.Rows...)
+				expected.Rows[1].Cells = append([]display.Cell(nil), doc.Rows[1].Cells...)
+				expected.Rows[1].Cells[0].Text = "□"
+				want, err := Render(expected, Options{MaxLines: 1, Format: format})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(got, want) {
+					t.Fatalf("replacement differs: bold=%t width=%d format=%s", bold, width, format)
+				}
+				if format == PNG {
+					decodePNG(t, got[1])
+				}
+			}
+		}
+	}
+}

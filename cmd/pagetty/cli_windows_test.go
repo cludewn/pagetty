@@ -105,7 +105,7 @@ func TestCLIWindowsInteractionAndCtrlC(t *testing.T) {
 			if mode == "interactive" && (!strings.Contains(out.String(), "got:日本語") || !strings.Contains(out.String(), "got:second")) {
 				t.Fatalf("input not forwarded: %q", out.String())
 			}
-			if mode == "size" && !strings.Contains(out.String(), "size:100:12:<nil>") {
+			if mode == "size" && !strings.Contains(out.String(), "size:80:12:<nil>") {
 				t.Fatalf("host terminal rows not used: %q", out.String())
 			}
 			paths := imageFiles(t, dir, "png")
