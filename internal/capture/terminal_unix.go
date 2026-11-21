@@ -5,17 +5,13 @@ package capture
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"syscall"
 
-	"github.com/charmbracelet/x/termios"
 	"github.com/charmbracelet/x/xpty"
 	"github.com/muesli/cancelreader"
-	"golang.org/x/sys/unix"
-	"golang.org/x/term"
 )
 
 func openPTY(columns, rows int) (xpty.Pty, io.ReadCloser, error) {
@@ -102,29 +98,6 @@ func openInput(f *os.File) (*inputReader, error) {
 }
 
 func inputCanceled(err error) bool { return errors.Is(err, cancelreader.ErrCanceled) }
-
-func finishInput(ctx context.Context, p xpty.Pty, input *os.File) error {
-	if term.IsTerminal(int(input.Fd())) {
-		return nil
-	}
-	var state *unix.Termios
-	var stateErr error
-	err := p.(*xpty.UnixPty).Control(func(fd uintptr) {
-		state, stateErr = termios.GetTermios(int(fd))
-	})
-	if err := errors.Join(err, stateErr); err != nil {
-		return fmt.Errorf("PTYのEOF設定を取得できません: %w", err)
-	}
-	if state.Lflag&unix.ICANON == 0 {
-		return errors.New("入力EOFの通知はcanonical modeのPTYだけに対応しています")
-	}
-	eof := state.Cc[unix.VEOF]
-	if eof == 0 || eof == 255 {
-		return errors.New("PTYのEOF文字が無効または未対応です（VEOF=0/255）")
-	}
-	// 改行のない末尾を最初のVEOFで渡し、次のVEOFで長さ0のreadを発生させる。
-	return writeOutput(ctx, p, []byte{eof, eof})
-}
 
 func prepareOutput(io.Writer) (func() error, error) {
 	return func() error { return nil }, nil

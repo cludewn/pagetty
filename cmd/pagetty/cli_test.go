@@ -36,6 +36,17 @@ func TestCLIChild(t *testing.T) {
 			continue
 		}
 		switch os.Args[i+1] {
+		case "mark":
+			if os.WriteFile(os.Args[i+2], []byte("started"), 0600) != nil {
+				os.Exit(11)
+			}
+			fmt.Print("started")
+		case "file-input":
+			data, err := io.ReadAll(os.Stdin)
+			if err != nil || term.IsTerminal(int(os.Stdin.Fd())) {
+				os.Exit(12)
+			}
+			fmt.Printf("INPUT:%q\ntty:%t:%t\n", data, term.IsTerminal(int(os.Stdout.Fd())), term.IsTerminal(int(os.Stderr.Fd())))
 		case "text":
 			fmt.Print("日本語ABCDEF")
 		case "args":

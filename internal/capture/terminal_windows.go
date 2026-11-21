@@ -145,8 +145,6 @@ func (r *consoleReader) Read(p []byte) (int, error) {
 
 func inputCanceled(err error) bool { return errors.Is(err, context.Canceled) }
 
-func finishInput(context.Context, xpty.Pty, *os.File) error { return nil }
-
 func prepareOutput(w io.Writer) (func() error, error) {
 	f, ok := w.(interface{ Fd() uintptr })
 	if !ok || !term.IsTerminal(int(f.Fd())) {

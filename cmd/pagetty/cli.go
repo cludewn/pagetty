@@ -9,7 +9,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"time"
 
@@ -24,6 +23,8 @@ const usage = `PageTTY — 対話型CLIの実行結果を画像として保存�
   pagetty capture [options] -- <command> [args...]
   pagetty capture --help
 `
+
+var errRedirectedInput = errors.New("PageTTY自身へのパイプ・ファイル入力は非対応です。実端末を使用するか、子シェル内で < input.txt を指定してください（capture --help参照）")
 
 func runCLI(ctx context.Context, args []string, input *os.File, output, diagnostics io.Writer) int {
 	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
@@ -50,12 +51,13 @@ func runCLI(ctx context.Context, args []string, input *os.File, output, diagnost
 例:
   pagetty capture -- ./a.out
   pagetty capture --format svg --output-dir ./results -- python main.py
+  pagetty capture -- sh -c 'exec ./a.out < input.txt'
+  pagetty capture -- cmd.exe /d /c ".\a.exe < input.txt"
 
 コマンドと引数はシェル展開せずに渡します。
 PTY行数は実端末から取得し、取得できなければ24行を使用します。
-Unixのパイプ・ファイル入力はcanonical modeのPTYへEOFを通知します。
-raw mode・EOF文字の無効化・転送中の端末モード変更は保証しません。
-Windowsの対話入力にはコンソールが必要です。リダイレクト入力は転送しません。
+PageTTY自身へのパイプ・ファイル入力は非対応です。入力ファイルは上記の子シェル内で指定してください。
+対話入力には実端末（Windowsではコンソール）が必要です。/dev/null・NULは入力なしとして扱います。
 中断・記録エラー時はpartial付きの名前で部分記録の保存を試みます。
 終了コード: 対象のコードを引継ぎ、引数不正2、ツール側失敗1、中断130。
 画像生成・保存の失敗は中断や対象のコードより優先します。`)
@@ -79,6 +81,11 @@ Windowsの対話入力にはコンソールが必要です。リダイレクト�
 		fmt.Fprintln(diagnostics, "pagetty: 引数エラー: formatはpng/svg、columnsは2〜32767、max-linesは正の整数、output-dirは空でないパスを指定してください")
 		return 2
 	}
+	input, err := cliInput(input)
+	if err != nil {
+		fmt.Fprintf(diagnostics, "pagetty: 標準入力エラー: %v\n", err)
+		return 2
+	}
 	dir, err := filepath.Abs(*outputDir)
 	if err != nil {
 		fmt.Fprintf(diagnostics, "pagetty: 保存先の解決失敗: %v\n", err)
@@ -86,13 +93,6 @@ Windowsの対話入力にはコンソールが必要です。リダイレクト�
 	}
 	prefix := "capture-" + time.Now().Format("20060102-150405.000000000-0700") + "-" + rand.Text()
 	rows := terminalRows(input, output)
-	if input != nil && !term.IsTerminal(int(input.Fd())) {
-		info, statErr := input.Stat()
-		// /dev/nullは入力待ちに登録できない。Windowsはコンソール入力だけを転送する。
-		if runtime.GOOS == "windows" || (statErr == nil && info.Mode()&os.ModeCharDevice != 0) {
-			input = nil
-		}
-	}
 	result, captureErr := capture.Run(ctx, args[separator+1:], capture.Options{
 		Columns: *columns, Rows: rows, Input: input, Output: output,
 	})

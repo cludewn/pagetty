@@ -21,8 +21,7 @@ import (
 
 // Options は記録時の固定サイズと入出力先を指定する。
 // Inputがnilなら入力を転送しない。端末なら実行中だけrawモードにする。
-// Unixの非端末入力は、転送後にcanonical modeの現在のVEOFでEOFを通知する。
-// raw modeとVEOF=0/255には対応しない。Windowsではコンソール入力のみ対応する。
+// Windowsではコンソール入力のみ対応する。入力元のEOFをPTYのEOFへは変換しない。
 // Outputがnilなら呼び出し元の標準出力を使う。入出力先の所有権は呼び出し元に残る。
 // Writeが5秒を超えて停止した場合は転送を打ち切るが、進行中のWrite自体は終了できない。
 // 返却後のOutput再利用・解放は、呼び出し元でそのWriteと同期する必要がある。
@@ -141,9 +140,6 @@ func Run(ctx context.Context, command []string, options Options) (result Result,
 	if input != nil {
 		go func() {
 			_, err := io.Copy(p, input.reader)
-			if err == nil && !inputStopped.Load() {
-				err = finishInput(runCtx, p, options.Input)
-			}
 			if inputStopped.Load() || inputCanceled(err) {
 				err = nil
 			} else if err != nil {
