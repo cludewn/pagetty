@@ -11,7 +11,7 @@ require (
 	github.com/muesli/cancelreader v0.2.2
 	github.com/srwiley/oksvg v0.0.0-20221011165216-be6e8873101c
 	github.com/srwiley/rasterx v0.0.0-20220730225603-2ab79fcdd4ef
-	golang.org/x/image v0.45.0
+	golang.org/x/image v0.48.0
 	golang.org/x/sys v0.50.0
 	golang.org/x/term v0.48.0
 	tuios.dev/vt v0.3.3
@@ -31,7 +31,7 @@ require (
 	github.com/xo/terminfo v1.0.0 // indirect
 	go.mitchellh.com/libghostty v0.0.0-20261107144202-b13f277ddcb2 // indirect
 	golang.org/x/net v0.58.0 // indirect
-	golang.org/x/sync v0.22.0 // indirect
-	golang.org/x/text v0.41.0 // indirect
+	golang.org/x/sync v0.25.0 // indirect
+	golang.org/x/text v0.44.0 // indirect
 	tuios.dev/progstatus v0.1.0 // indirect
 )
