@@ -186,6 +186,13 @@ function Clear-Payload($path) {
 }
 
 function Invoke-PageTTYSetup($root, $source, $launcher, $key, $effective, [bool]$uninstall) {
+    if (!$root -or $root -match '[;%]') { throw 'Unsupported LocalAppData location.' }
+    # DirectoryInfo.Parent does not have the provider's PSIsContainer property.
+    for ($item = Get-Item -LiteralPath $root -Force -ErrorAction Stop; $item; $item = $item.Parent) {
+        if ($item -isnot [IO.DirectoryInfo] -or !$item.Exists -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw "Unsafe installation path: $($item.FullName)"
+        }
+    }
     $dir = Join-Path $root 'PageTTY'
     $work = Join-Path $root 'PageTTY.setup'
     $stage = Join-Path $work 'new'
@@ -324,12 +331,6 @@ function Send-PathNotification([bool]$uninstall) {
 
 # Command entry point
 $root = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
-if (!$root -or $root -match '[;%]') { throw 'Unsupported LocalAppData location.' }
-for ($item = Get-Item -LiteralPath $root -Force; $item; $item = $item.Parent) {
-    if (!$item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
-        throw "Unsafe installation path: $($item.FullName)"
-    }
-}
 $uninstall = $env:PAGETTY_UNINSTALL -eq '1'
 if (!$uninstall) { Initialize-Native }
 $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)

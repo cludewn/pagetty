@@ -24,7 +24,8 @@ function Send-PathNotification([bool]$uninstall) { $notifications.Add($uninstall
 
 $base = Join-Path ([IO.Path]::GetTempPath()) ('PageTTY test [' + [guid]::NewGuid().ToString('N') + ']')
 $source = Join-Path $base 'extracted'
-$root = Join-Path $base 'Local AppData'
+$appData = Join-Path $base 'AppData'
+$root = Join-Path $appData 'Local'
 $dir = Join-Path $root 'PageTTY'
 $work = Join-Path $root 'PageTTY.setup'
 $launcher = Join-Path $source 'install.cmd'
@@ -88,10 +89,49 @@ function Expect-Unchanged($key, $before, $snapshot) {
 [IO.Directory]::CreateDirectory($source) | Out-Null
 [IO.Directory]::CreateDirectory($root) | Out-Null
 try {
+    # Windows normally marks AppData as hidden. The provider and .NET parent have different shapes.
+    [IO.File]::SetAttributes($appData, [IO.File]::GetAttributes($appData) -bor [IO.FileAttributes]::Hidden)
+    $rootItem = Get-Item -LiteralPath $root -Force
+    $parent = $rootItem.Parent
+    Assert ($rootItem.PSIsContainer -and $parent -is [IO.DirectoryInfo] -and !$parent.PSIsContainer) 'The fixture did not reproduce the old parent check'
+    Assert (($parent.Attributes -band [IO.FileAttributes]::Hidden) -and
+        !($parent.Attributes -band [IO.FileAttributes]::ReparsePoint)) 'Unexpected AppData attributes'
+
     Set-Version first
     $raw = '%CUSTOM%;C:\User;;'
     $key = New-FakeKey ExpandString $raw
     $before = Get-PathHash (Read-Path $key)
+
+    $fileRoot = Join-Path $base 'not-a-directory'
+    [IO.File]::WriteAllText($fileRoot, 'keep')
+    $invalidPath = 'Unsafe installation path: ' + [regex]::Escape($fileRoot)
+    Assert-Fails { Invoke-PageTTYSetup $fileRoot $source $launcher $key '' $false } $invalidPath
+    Assert ([IO.File]::ReadAllText($fileRoot) -ceq 'keep') 'The invalid root file was changed'
+    Expect-Unchanged $key $before $null
+
+    $target = [System.Management.Automation.WildcardPattern]::Escape($appData)
+    foreach ($linkType in @('Junction','SymbolicLink')) {
+        $link = Join-Path $base $linkType
+        try {
+            New-Item -Path $link -ItemType $linkType -Target $target -Force | Out-Null
+        } catch {
+            if ($linkType -ne 'SymbolicLink' -or
+                $_.FullyQualifiedErrorId -ne 'NewItemSymbolicLinkElevationRequired,Microsoft.PowerShell.Commands.NewItemCommand') { throw }
+            Write-Host 'Directory symlink fixture skipped: Windows requires administrator privileges.'
+            continue
+        }
+        try {
+            $invalidPath = 'Unsafe installation path: ' + [regex]::Escape($link) + '$'
+            foreach ($linkedRoot in @($link, (Join-Path $link 'Local'))) {
+                Assert-Fails { Invoke-PageTTYSetup $linkedRoot $source $launcher $key '' $false } $invalidPath
+                Expect-Unchanged $key $before $null
+                Assert (![IO.Directory]::Exists((Join-Path $appData 'PageTTY')) -and
+                    ![IO.Directory]::Exists((Join-Path $appData 'PageTTY.setup'))) 'A rejected link changed its target'
+            }
+        } finally { [IO.Directory]::Delete($link) }
+    }
+    Assert ($key.Writes -eq 0 -and $notifications.Count -eq 0) 'Rejected paths caused a PATH write or notification'
+
     $atLimit = 'x' * (8191 - $dir.Length - 1)
     $plan = Get-PathPlan (Read-Path $key) $atLimit $dir $null $false
     Assert ($plan.Change -and $plan.Value.Kind -eq 'ExpandString') '8191 characters should fit'
