@@ -442,7 +442,17 @@ $ErrorActionPreference = 'Stop'
 if ($env:PAGETTY_UNINSTALL -ne '1') { throw 'Wrong worker mode.' }
 if ([Environment]::CurrentDirectory -ine $env:SystemRoot) { throw "Wrong worker startup directory: $([Environment]::CurrentDirectory)" }
 $folder = [IO.Path]::GetDirectoryName($env:PAGETTY_SETUP)
-[IO.Directory]::Move($folder, [IO.Path]::Combine([IO.Path]::GetDirectoryName($folder), 'launched'))
+$destination = [IO.Path]::Combine([IO.Path]::GetDirectoryName($folder), 'launched')
+for ($attempt = 1; ; $attempt++) {
+    try {
+        [IO.Directory]::Move($folder, $destination)
+        break
+    } catch [IO.IOException] {
+        # ランチャーが作業ディレクトリを保持している間の共有違反だけを再試行する。
+        if ($attempt -ge 20 -or $_.Exception.GetBaseException().HResult -ne 0x80070020) { throw }
+        Start-Sleep -Milliseconds 50
+    }
+}
 Write-Host 'LAUNCHER WORKER OK'
 return 0
 '@
