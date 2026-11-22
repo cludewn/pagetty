@@ -98,12 +98,16 @@ func TestRunExitAndArguments(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			var out bytes.Buffer
+			before := time.Now()
 			result, err := Run(ctx, tc.command, Options{Columns: 256, Rows: 3, Output: &out})
 			if err != nil {
 				t.Fatal(err)
 			}
 			if !result.Started || result.ExitCode != tc.code || result.Interrupted {
 				t.Fatalf("result=%+v", result)
+			}
+			if result.CommandEndedAt.Before(before) || result.CommandEndedAt.After(time.Now()) {
+				t.Fatalf("command end time outside Run: %v", result.CommandEndedAt)
 			}
 			if got := strings.Join(rowTexts(result.Document), ""); got != tc.text {
 				t.Fatalf("display=%q, want %q", got, tc.text)
@@ -121,7 +125,7 @@ func TestRunExitAndArguments(t *testing.T) {
 
 func TestRunStartFailure(t *testing.T) {
 	result, err := Run(context.Background(), []string{"/pagetty-nonexistent-command"}, Options{Columns: 20, Rows: 3, Output: io.Discard})
-	if err == nil || result.Started || result.ExitCode != -1 || len(result.Document.Rows) != 0 {
+	if err == nil || result.Started || result.ExitCode != -1 || !result.CommandEndedAt.IsZero() || len(result.Document.Rows) != 0 {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
 }

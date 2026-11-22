@@ -219,6 +219,10 @@ func TestRunDescendantHoldingPTY(t *testing.T) {
 		!strings.Contains(strings.Join(rowTexts(result.Document), ""), "parent") {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
+	// 回収タイムアウトの経過を含め、待機終了時刻が回収後の時刻になっていないこと。
+	if result.CommandEndedAt.IsZero() || time.Since(result.CommandEndedAt) < 5*time.Second {
+		t.Fatalf("output drain time excluded: command ended at %v", result.CommandEndedAt)
+	}
 }
 
 func TestTerminalQueryChild(t *testing.T) {

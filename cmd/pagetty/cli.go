@@ -125,7 +125,7 @@ PageTTY自身へのパイプ・ファイル入力は非対応です。入力フ�
 	}
 	fmt.Fprintf(diagnostics, "pagetty: Saving %d %s...\n", len(images), pageWord(len(images)))
 	paths, err := saveImages(dir, started.Format("20060102-150405"), partial, images)
-	elapsed := time.Since(started)
+	elapsed := time.Since(result.CommandEndedAt)
 	for _, path := range paths {
 		fmt.Fprintf(diagnostics, "pagetty: Output: %s\n", path)
 	}
@@ -144,11 +144,14 @@ PageTTY自身へのパイプ・ファイル入力は非対応です。入力フ�
 	return code
 }
 
-func completionDuration(elapsed time.Duration) time.Duration {
-	if elapsed < time.Second {
-		return elapsed.Round(time.Millisecond)
+func completionDuration(elapsed time.Duration) string {
+	if elapsed < time.Millisecond {
+		return "<1ms"
 	}
-	return elapsed.Round(10 * time.Millisecond)
+	if elapsed < time.Second {
+		return elapsed.Round(time.Millisecond).String()
+	}
+	return elapsed.Round(10 * time.Millisecond).String()
 }
 
 func terminalRows(input *os.File, output io.Writer) int {

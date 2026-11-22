@@ -40,10 +40,12 @@ type Options struct {
 // 対象の非0終了だけではRunのエラーにしない。
 // Interrupted は中断シグナルによる終了、または呼び出し元コンテキストの中断を示す。
 type Result struct {
-	Document    display.Document
-	Started     bool
-	ExitCode    int
-	Interrupted bool
+	Document display.Document
+	// CommandEndedAt は終了待ちを終え、残りの出力を回収する前の時刻。
+	CommandEndedAt time.Time
+	Started        bool
+	ExitCode       int
+	Interrupted    bool
 }
 
 // Run はcommand[0]を残りの引数で直接実行する。同じ端末での同時呼び出しはしない。
@@ -150,6 +152,7 @@ func Run(ctx context.Context, command []string, options Options) (result Result,
 	}
 
 	waitErr := xpty.WaitProcess(runCtx, cmd)
+	result.CommandEndedAt = time.Now()
 	if input != nil {
 		inputStopped.Store(true)
 		input.cancel()

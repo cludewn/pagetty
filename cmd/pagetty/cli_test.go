@@ -22,6 +22,8 @@ import (
 	"golang.org/x/term"
 )
 
+const cliTestCommandWait = 150 * time.Millisecond
+
 func childArgs(mode string, args ...string) []string {
 	exe, err := os.Executable()
 	if err != nil {
@@ -54,7 +56,7 @@ func TestCLIChild(t *testing.T) {
 			fmt.Print(string(data))
 		case "lines", "delayed-lines":
 			if os.Args[i+1] == "delayed-lines" {
-				time.Sleep(150 * time.Millisecond)
+				time.Sleep(cliTestCommandWait)
 			}
 			for i := range 5 {
 				fmt.Printf("line%d\n", i)
@@ -219,27 +221,92 @@ func TestCLIFormatsWidthAndPages(t *testing.T) {
 	}
 }
 
+type completionTestLog struct {
+	bytes.Buffer
+	running, rendering, saving, output time.Time
+}
+
+func (log *completionTestLog) Write(p []byte) (int, error) {
+	switch {
+	case bytes.HasPrefix(p, []byte("pagetty: Running command...")):
+		log.running = time.Now()
+	case log.rendering.IsZero() && bytes.HasPrefix(p, []byte("pagetty: Rendering (")):
+		log.rendering = time.Now()
+	case bytes.HasPrefix(p, []byte("pagetty: Saving ")):
+		// 保存直前の待ちも計測区間に含まれるよう、ここで観測点を分ける。
+		time.Sleep(25 * time.Millisecond)
+		log.saving = time.Now()
+	case log.output.IsZero() && bytes.HasPrefix(p, []byte("pagetty: Output: ")):
+		log.output = time.Now()
+	}
+	return log.Buffer.Write(p)
+}
+
 func TestCLIReportsPageProgressOnStderr(t *testing.T) {
-	dir := t.TempDir()
-	code, output, diagnostics := runTestCLI(t, cliArgs([]string{"--format", "svg", "--max-lines", "2", "--output-dir", dir}, "delayed-lines"))
-	if code != 0 || !strings.HasPrefix(output, "line0") || strings.Contains(output, "pagetty:") {
-		t.Fatalf("code=%d output=%q diagnostics=%q", code, output, diagnostics)
+	for _, format := range []string{"png", "svg"} {
+		t.Run(format, func(t *testing.T) {
+			dir := t.TempDir()
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			var output bytes.Buffer
+			var log completionTestLog
+			args := cliArgs([]string{"--format", format, "--max-lines", "2", "--output-dir", dir}, "delayed-lines")
+			code := runCLI(ctx, args, nil, &output, &log)
+			if code != 0 || !strings.HasPrefix(output.String(), "line0") || strings.Contains(output.String(), "pagetty:") {
+				t.Fatalf("code=%d output=%q diagnostics=%q", code, output.String(), log.String())
+			}
+			if strings.ContainsAny(log.String(), "\r\x1b") {
+				t.Fatalf("redirected stderr contains terminal controls: %q", log.String())
+			}
+			diagnostics := log.String()
+			for _, step := range []string{"Running command...", "Rendering 0/3 pages", "Rendering 1/3 pages",
+				"Rendering 2/3 pages", "Rendering 3/3 pages", "Saving 3 pages...",
+				"pagetty: Saved 3 " + strings.ToUpper(format) + " pages in "} {
+				_, rest, ok := strings.Cut(diagnostics, step)
+				if !ok {
+					t.Fatalf("missing or out-of-order %q: %q", step, diagnostics)
+				}
+				diagnostics = rest
+			}
+			if log.running.IsZero() || log.rendering.IsZero() || log.saving.IsZero() || log.output.IsZero() || len(imageFiles(t, dir, format)) != 3 {
+				t.Fatalf("missing timing checkpoint or saved pages: %s", log.String())
+			}
+			elapsed, err := time.ParseDuration(strings.TrimSpace(diagnostics))
+			if err != nil {
+				t.Fatalf("expected a single completion duration: %q", diagnostics)
+			}
+			// 絶対時間でなく、同じ実行で観測した区間と比べる。
+			const rounding = 5 * time.Millisecond
+			if excluded := log.output.Sub(log.running) - elapsed; excluded+rounding < cliTestCommandWait {
+				t.Errorf("command wait was included: displayed %s, total %s", elapsed, log.output.Sub(log.running))
+			}
+			if minimum := log.saving.Sub(log.rendering); elapsed+rounding < minimum {
+				t.Errorf("rendering or saving phase was excluded: displayed %s, minimum %s", elapsed, minimum)
+			}
+		})
 	}
-	if strings.ContainsAny(diagnostics, "\r\x1b") {
-		t.Fatalf("redirected stderr contains terminal controls: %q", diagnostics)
-	}
-	for _, step := range []string{"Running command...", "Rendering 0/3 pages", "Rendering 1/3 pages",
-		"Rendering 2/3 pages", "Rendering 3/3 pages", "Saving 3 pages...",
-		"pagetty: Saved 3 SVG pages in "} {
-		_, rest, ok := strings.Cut(diagnostics, step)
-		if !ok {
-			t.Fatalf("missing or out-of-order %q: %q", step, diagnostics)
+}
+
+func TestCompletionDuration(t *testing.T) {
+	for _, tt := range []struct {
+		elapsed time.Duration
+		want    string
+	}{
+		{0, "<1ms"},
+		{900 * time.Microsecond, "<1ms"},
+		{time.Millisecond, "1ms"},
+		{419600 * time.Microsecond, "420ms"},
+		{999499 * time.Microsecond, "999ms"},
+		{999500 * time.Microsecond, "1s"},
+		{time.Second, "1s"},
+		{1005 * time.Millisecond, "1.01s"},
+		{1778 * time.Millisecond, "1.78s"},
+		{59999 * time.Millisecond, "1m0s"},
+		{time.Minute + 1234*time.Millisecond, "1m1.23s"},
+	} {
+		if got := completionDuration(tt.elapsed); got != tt.want {
+			t.Errorf("duration %s: got %q, want %q", tt.elapsed, got, tt.want)
 		}
-		diagnostics = rest
-	}
-	elapsed, err := time.ParseDuration(strings.TrimSpace(diagnostics))
-	if err != nil || elapsed < 150*time.Millisecond {
-		t.Errorf("expected a single elapsed time including command execution, got %q", diagnostics)
 	}
 }
 
