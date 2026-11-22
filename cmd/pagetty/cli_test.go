@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/x/ansi"
 	"golang.org/x/term"
 )
 
@@ -242,6 +243,21 @@ func (log *completionTestLog) Write(p []byte) (int, error) {
 	return log.Buffer.Write(p)
 }
 
+func progressChildOutput(output string) string {
+	// ConPTYは実行ファイルの出力の前後や途中に端末制御シーケンスを挿入する。
+	return strings.ReplaceAll(ansi.Strip(output), "\r\n", "\n")
+}
+
+const progressChildLines = "line0\nline1\nline2\nline3\nline4\n"
+
+func TestProgressChildOutputWithConPTYControls(t *testing.T) {
+	const raw = "\x1b[?9001h\x1b[?1004h\x1b[?25l\x1b[2J\x1b[m\x1b[Hline0\r\n" +
+		"\x1b]0;C:\\Temp\\pagetty.test.exe\a\x1b[?25h\x1b[?9001l\x1b[?1004lline1\r\nline2\r\nline3\r\nline4\r\n"
+	if got := progressChildOutput(raw); got != progressChildLines {
+		t.Fatalf("normalized ConPTY output = %q, want %q", got, progressChildLines)
+	}
+}
+
 func TestCLIReportsPageProgressOnStderr(t *testing.T) {
 	for _, format := range []string{"png", "svg"} {
 		t.Run(format, func(t *testing.T) {
@@ -252,7 +268,7 @@ func TestCLIReportsPageProgressOnStderr(t *testing.T) {
 			var log completionTestLog
 			args := cliArgs([]string{"--format", format, "--max-lines", "2", "--output-dir", dir}, "delayed-lines")
 			code := runCLI(ctx, args, nil, &output, &log)
-			if code != 0 || !strings.HasPrefix(output.String(), "line0") || strings.Contains(output.String(), "pagetty:") {
+			if code != 0 || progressChildOutput(output.String()) != progressChildLines || strings.Contains(output.String(), "pagetty:") {
 				t.Fatalf("code=%d output=%q diagnostics=%q", code, output.String(), log.String())
 			}
 			if strings.ContainsAny(log.String(), "\r\x1b") {
