@@ -26,8 +26,9 @@ const (
 )
 
 type Options struct {
-	MaxLines int    // 正の最大表示行数。
-	Format   Format // 空ならPNG。
+	MaxLines int                   // 正の最大表示行数。
+	Format   Format                // 空ならPNG。
+	Progress func(done, total int) // 分割後と各ページ生成後に同期的に呼ぶ。
 }
 
 type Image struct {
@@ -68,6 +69,9 @@ func Render(doc display.Document, options Options) ([]Image, error) {
 	if len(pages) == 0 {
 		return nil, nil
 	}
+	if options.Progress != nil {
+		options.Progress(0, len(pages))
+	}
 	if err := validate(doc); err != nil {
 		return nil, err
 	}
@@ -91,6 +95,9 @@ func Render(doc display.Document, options Options) ([]Image, error) {
 		}
 		result.Format, result.Data = format, data.Bytes()
 		images = append(images, result)
+		if options.Progress != nil {
+			options.Progress(i+1, len(pages))
+		}
 	}
 	return images, nil
 }
@@ -153,10 +160,20 @@ func drawPage(doc display.Document, regular, bold *loadedFont) (Image, error) {
 		column := 0
 		y := padding + i*lineHeight
 		// 後続セルの背景で斜体や結合文字の端を消さないよう、背景を先に描く。
+		var start int
+		var background color.RGBA
 		for _, cell := range row.Cells {
 			_, bg := colors(cell.Style)
-			rect(&data, padding+column*cellWidth, y, cell.Width*cellWidth, lineHeight, bg)
+			if bg != background {
+				if column > start {
+					rect(&data, padding+start*cellWidth, y, (column-start)*cellWidth, lineHeight, background)
+				}
+				background, start = bg, column
+			}
 			column += cell.Width
+		}
+		if column > start {
+			rect(&data, padding+start*cellWidth, y, (column-start)*cellWidth, lineHeight, background)
 		}
 		column = 0
 		for j, cell := range row.Cells {
@@ -176,16 +193,18 @@ func drawPage(doc display.Document, regular, bold *loadedFont) (Image, error) {
 			}
 			fg, _ := colors(cell.Style)
 			x, textY := padding+column*cellWidth, y+baseline
-			sx := 1.0
-			// 字形がセル幅を超える場合だけ縮め、後続セルの位置はWidthで決める。
-			if width := float64(cell.Width * cellWidth); width < path.advance {
-				sx = width / path.advance
+			if path.data != "" {
+				sx := 1.0
+				// 字形がセル幅を超える場合だけ縮め、後続セルの位置はWidthで決める。
+				if width := float64(cell.Width * cellWidth); width < path.advance {
+					sx = width / path.advance
+				}
+				slant := 0.0
+				if cell.Style.Italic {
+					slant = -0.3 * sx
+				}
+				fmt.Fprintf(&data, `<path fill="#%02x%02x%02x" d="%s" transform="matrix(%g 0 %g 1 %d %d)"/>`, fg.R, fg.G, fg.B, path.data, sx, slant, x, textY)
 			}
-			slant := 0.0
-			if cell.Style.Italic {
-				slant = -0.3 * sx
-			}
-			fmt.Fprintf(&data, `<path fill="#%02x%02x%02x" d="%s" transform="matrix(%g 0 %g 1 %d %d)"/>`, fg.R, fg.G, fg.B, path.data, sx, slant, x, textY)
 			if cell.Style.Underline {
 				rect(&data, x, textY+2, cell.Width*cellWidth, 1, fg)
 			}

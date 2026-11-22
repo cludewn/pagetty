@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
 	"errors"
 	"flag"
 	"fmt"
@@ -10,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/cludewn/pagetty/internal/capture"
@@ -81,11 +81,13 @@ PageTTY自身へのパイプ・ファイル入力は非対応です。入力フ�
 		fmt.Fprintf(diagnostics, "pagetty: 保存先の解決失敗: %v\n", err)
 		return 1
 	}
-	prefix := "capture-" + time.Now().Format("20060102-150405.000000000-0700") + "-" + rand.Text()
+	started := time.Now()
+	fmt.Fprintln(diagnostics, "pagetty: Running command...")
 	rows := terminalRows(input, output)
 	result, captureErr := capture.Run(ctx, args[separator+1:], capture.Options{
 		Columns: *columns, Rows: rows, Input: input, Output: output,
 	})
+	captureTime := time.Since(started)
 	// 対象の最終行に改行がなくても、案内を実行結果から分離する。
 	fmt.Fprintln(diagnostics)
 	if captureErr != nil {
@@ -104,30 +106,45 @@ PageTTY自身へのパイプ・ファイル入力は非対応です。入力フ�
 	} else if code != 0 {
 		fmt.Fprintf(diagnostics, "pagetty: 対象プログラムの終了失敗: 終了コード %d\n", code)
 	}
-	if captureErr != nil || result.Interrupted {
-		prefix += "-partial"
-		if !result.Interrupted {
-			code = 1
-		}
+	partial := captureErr != nil || result.Interrupted
+	if captureErr != nil && !result.Interrupted {
+		code = 1
 	}
 	if len(result.Document.Rows) == 0 {
-		fmt.Fprintln(diagnostics, "pagetty: 記録された表示がないため画像を保存しませんでした")
+		fmt.Fprintln(diagnostics, "pagetty: No visible output to save.")
 		return code
 	}
-	images, err := render.Render(result.Document, render.Options{Format: render.Format(*format), MaxLines: *maxLines})
+	renderStart := time.Now()
+	update, stop := startRenderProgress(diagnostics, isTerminal(diagnostics), renderStart)
+	images, err := render.Render(result.Document, render.Options{
+		Format: render.Format(*format), MaxLines: *maxLines, Progress: update,
+	})
+	renderTime := time.Since(renderStart)
+	stop()
 	if err != nil {
 		fmt.Fprintf(diagnostics, "pagetty: レンダリング失敗: %v\n", err)
 		return 1
 	}
-	paths, err := saveImages(dir, prefix, images)
+	fmt.Fprintf(diagnostics, "pagetty: Saving %d %s...\n", len(images), pageWord(len(images)))
+	saveStart := time.Now()
+	paths, err := saveImages(dir, started.Format("20060102-150405"), partial, images)
+	saveTime := time.Since(saveStart)
 	for _, path := range paths {
-		fmt.Fprintf(diagnostics, "pagetty: 保存: %s\n", path)
+		fmt.Fprintf(diagnostics, "pagetty: Saved to %s\n", path)
 	}
 	if err != nil {
 		fmt.Fprintf(diagnostics, "pagetty: 画像保存失敗（%d/%dページ保存）: %v\n", len(paths), len(images), err)
 		return 1
 	}
-	fmt.Fprintf(diagnostics, "pagetty: %dページの%s画像を保存しました\n", len(paths), *format)
+	status := ""
+	if partial {
+		status = "partial capture; "
+	} else if code != 0 {
+		status = "command failed; "
+	}
+	fmt.Fprintf(diagnostics, "pagetty: Saved %d %s %s (%stotal %s, capture %s, render %s, save %s)\n",
+		len(paths), strings.ToUpper(*format), pageWord(len(paths)), status, time.Since(started).Round(time.Millisecond),
+		captureTime.Round(time.Millisecond), renderTime.Round(time.Millisecond), saveTime.Round(time.Millisecond))
 	return code
 }
 

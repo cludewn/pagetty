@@ -146,7 +146,11 @@ func TestCLIUnixProcessSignals(t *testing.T) {
 				defer reader.Close()
 				ready := make(chan string, 1)
 				go func() {
-					line, _ := bufio.NewReader(reader).ReadString('\n')
+					lines := bufio.NewReader(reader)
+					line, _ := lines.ReadString('\n')
+					if mode == "Ctrl+C" && strings.HasPrefix(line, "pagetty: ") {
+						line, _ = lines.ReadString('\n')
+					}
 					ready <- line
 				}()
 				select {
@@ -208,7 +212,7 @@ func TestCLIUnixProcessSignals(t *testing.T) {
 					t.Fatalf("child SIGPIPE changed: output=%q diagnostics=%q", output.String(), diagnostics.String())
 				}
 			case "closed stdout":
-				if !strings.Contains(diagnostics.String(), "PTY実行・記録失敗") || !strings.Contains(diagnostics.String(), "broken pipe") || !strings.Contains(diagnostics.String(), "2ページのpng画像を保存しました") {
+				if !strings.Contains(diagnostics.String(), "PTY実行・記録失敗") || !strings.Contains(diagnostics.String(), "broken pipe") || !strings.Contains(diagnostics.String(), "Saved 2 PNG pages (partial capture;") {
 					t.Fatalf("write failure or save result not reported: %q", diagnostics.String())
 				}
 			case "Ctrl+C":

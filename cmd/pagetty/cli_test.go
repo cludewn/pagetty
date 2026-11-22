@@ -182,7 +182,7 @@ func TestCLIFormatsWidthAndPages(t *testing.T) {
 				t.Fatalf("code=%d output=%q diagnostics=%q", code, output, diagnostics)
 			}
 			paths := imageFiles(t, dir, format)
-			if len(paths) != 2 || !strings.Contains(diagnostics, "2ページの"+format) {
+			if len(paths) != 2 || !strings.Contains(diagnostics, "Saved 2 "+strings.ToUpper(format)+" pages") {
 				t.Fatalf("paths=%v diagnostics=%q", paths, diagnostics)
 			}
 			prefix := strings.TrimSuffix(paths[0], "_001."+format)
@@ -213,6 +213,26 @@ func TestCLIFormatsWidthAndPages(t *testing.T) {
 		if w != 832 || h != wantHeight {
 			t.Fatalf("page=%d size=%dx%d", i, w, h)
 		}
+	}
+}
+
+func TestCLIReportsPageProgressOnStderr(t *testing.T) {
+	dir := t.TempDir()
+	code, output, diagnostics := runTestCLI(t, cliArgs([]string{"--format", "svg", "--max-lines", "2", "--output-dir", dir}, "lines"))
+	if code != 0 || !strings.HasPrefix(output, "line0") || strings.Contains(output, "pagetty:") {
+		t.Fatalf("code=%d output=%q diagnostics=%q", code, output, diagnostics)
+	}
+	if strings.ContainsAny(diagnostics, "\r\x1b") {
+		t.Fatalf("redirected stderr contains terminal controls: %q", diagnostics)
+	}
+	for _, step := range []string{"Running command...", "Rendering 0/3 pages", "Rendering 1/3 pages",
+		"Rendering 2/3 pages", "Rendering 3/3 pages", "Saving 3 pages...",
+		"Saved 3 SVG pages (total ", "capture ", "render ", "save "} {
+		_, rest, ok := strings.Cut(diagnostics, step)
+		if !ok {
+			t.Fatalf("missing or out-of-order %q: %q", step, diagnostics)
+		}
+		diagnostics = rest
 	}
 }
 
@@ -309,7 +329,7 @@ func TestCLINonzeroAndFailures(t *testing.T) {
 		t.Fatal(err)
 	}
 	code, _, diagnostics := runTestCLI(t, cliArgs([]string{"--output-dir", blocker}, "nonzero"))
-	if code != 1 || !strings.Contains(diagnostics, "画像保存失敗（0/1ページ保存）") || !strings.Contains(diagnostics, "終了コード 7") || strings.Contains(diagnostics, "画像を保存しました") {
+	if code != 1 || !strings.Contains(diagnostics, "画像保存失敗（0/1ページ保存）") || !strings.Contains(diagnostics, "終了コード 7") || strings.Contains(diagnostics, "pagetty: Saved 1") {
 		t.Fatalf("code=%d diagnostics=%q", code, diagnostics)
 	}
 	data, err := os.ReadFile(blocker)
@@ -369,7 +389,7 @@ func TestCLIInterruptedSaveFailure(t *testing.T) {
 	defer cancel()
 	var diagnostics bytes.Buffer
 	code := runCLI(ctx, cliArgs([]string{"--output-dir", path}, "block"), nil, cancelOutput{cancel}, &diagnostics)
-	if code != 1 || !strings.Contains(diagnostics.String(), "中断されました") || !strings.Contains(diagnostics.String(), "画像保存失敗") || strings.Contains(diagnostics.String(), "画像を保存しました") {
+	if code != 1 || !strings.Contains(diagnostics.String(), "中断されました") || !strings.Contains(diagnostics.String(), "画像保存失敗") || strings.Contains(diagnostics.String(), "pagetty: Saved 1") {
 		t.Fatalf("code=%d diagnostics=%q", code, diagnostics.String())
 	}
 }
