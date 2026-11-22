@@ -19,8 +19,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/x/ansi"
 	"golang.org/x/term"
 )
+
+const cliTestCommandWait = 150 * time.Millisecond
 
 func childArgs(mode string, args ...string) []string {
 	exe, err := os.Executable()
@@ -52,7 +55,10 @@ func TestCLIChild(t *testing.T) {
 		case "args":
 			data, _ := json.Marshal(os.Args[i+2:])
 			fmt.Print(string(data))
-		case "lines":
+		case "lines", "delayed-lines":
+			if os.Args[i+1] == "delayed-lines" {
+				time.Sleep(cliTestCommandWait)
+			}
 			for i := range 5 {
 				fmt.Printf("line%d\n", i)
 			}
@@ -90,7 +96,7 @@ func TestCLIChild(t *testing.T) {
 }
 
 func cliArgs(options []string, mode string, args ...string) []string {
-	result := append([]string{"capture"}, options...)
+	result := append([]string(nil), options...)
 	result = append(result, "--")
 	return append(result, childArgs(mode, args...)...)
 }
@@ -105,16 +111,17 @@ func runTestCLI(t *testing.T, args []string) (int, string, string) {
 }
 
 func TestCLIHelpAndInvalidArguments(t *testing.T) {
-	for _, args := range [][]string{{"--help"}, {"-h"}, {"capture", "--help"}, {"capture", "-h"}} {
+	for _, args := range [][]string{{"--help"}, {"-h"}} {
 		code, output, diagnostics := runTestCLI(t, args)
-		if code != 0 || !strings.Contains(output, "pagetty capture") || diagnostics != "" {
+		if code != 0 || strings.Contains(output, "pagetty capture") || !strings.Contains(output, "pagetty [options] -- <command> [args...]") || !strings.Contains(output, "--format svg") || diagnostics != "" {
 			t.Fatalf("args=%q code=%d output=%q diagnostics=%q", args, code, output, diagnostics)
 		}
 	}
 	for _, args := range [][]string{
-		nil, {"unknown"}, {"--help", "extra"}, {"capture"}, {"capture", "--"},
-		{"capture", "echo", "bad"}, {"capture", "unexpected", "--", "echo"},
-		{"capture", "--unknown", "--", "echo"}, {"capture", "--columns", "x", "--", "echo"},
+		nil, {"echo", "text"}, {"--format", "svg", "echo"}, {"--help", "extra"},
+		{"--"}, {"--format", "svg", "--"}, {"--", ""}, {"unexpected", "--", "echo"},
+		{"capture", "--help"}, {"capture", "--", "echo"}, {"--help", "--", "echo"},
+		{"--unknown", "--", "echo"}, {"--columns", "--", "echo"}, {"--columns", "x", "--", "echo"},
 	} {
 		code, _, diagnostics := runTestCLI(t, args)
 		if code != 2 || diagnostics == "" {
@@ -181,7 +188,7 @@ func TestCLIFormatsWidthAndPages(t *testing.T) {
 				t.Fatalf("code=%d output=%q diagnostics=%q", code, output, diagnostics)
 			}
 			paths := imageFiles(t, dir, format)
-			if len(paths) != 2 || !strings.Contains(diagnostics, "2ページの"+format) {
+			if len(paths) != 2 || !strings.Contains(diagnostics, "Saved 2 "+strings.ToUpper(format)+" pages") {
 				t.Fatalf("paths=%v diagnostics=%q", paths, diagnostics)
 			}
 			prefix := strings.TrimSuffix(paths[0], "_001."+format)
@@ -215,6 +222,110 @@ func TestCLIFormatsWidthAndPages(t *testing.T) {
 	}
 }
 
+type completionTestLog struct {
+	bytes.Buffer
+	running, rendering, saving, output time.Time
+}
+
+func (log *completionTestLog) Write(p []byte) (int, error) {
+	switch {
+	case bytes.HasPrefix(p, []byte("pagetty: Running command...")):
+		log.running = time.Now()
+	case log.rendering.IsZero() && bytes.HasPrefix(p, []byte("pagetty: Rendering (")):
+		log.rendering = time.Now()
+	case bytes.HasPrefix(p, []byte("pagetty: Saving ")):
+		// 保存直前の待ちも計測区間に含まれるよう、ここで観測点を分ける。
+		time.Sleep(25 * time.Millisecond)
+		log.saving = time.Now()
+	case log.output.IsZero() && bytes.HasPrefix(p, []byte("pagetty: Output: ")):
+		log.output = time.Now()
+	}
+	return log.Buffer.Write(p)
+}
+
+func progressChildOutput(output string) string {
+	// ConPTYは実行ファイルの出力の前後や途中に端末制御シーケンスを挿入する。
+	return strings.ReplaceAll(ansi.Strip(output), "\r\n", "\n")
+}
+
+const progressChildLines = "line0\nline1\nline2\nline3\nline4\n"
+
+func TestProgressChildOutputWithConPTYControls(t *testing.T) {
+	const raw = "\x1b[?9001h\x1b[?1004h\x1b[?25l\x1b[2J\x1b[m\x1b[Hline0\r\n" +
+		"\x1b]0;C:\\Temp\\pagetty.test.exe\a\x1b[?25h\x1b[?9001l\x1b[?1004lline1\r\nline2\r\nline3\r\nline4\r\n"
+	if got := progressChildOutput(raw); got != progressChildLines {
+		t.Fatalf("normalized ConPTY output = %q, want %q", got, progressChildLines)
+	}
+}
+
+func TestCLIReportsPageProgressOnStderr(t *testing.T) {
+	for _, format := range []string{"png", "svg"} {
+		t.Run(format, func(t *testing.T) {
+			dir := t.TempDir()
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			var output bytes.Buffer
+			var log completionTestLog
+			args := cliArgs([]string{"--format", format, "--max-lines", "2", "--output-dir", dir}, "delayed-lines")
+			code := runCLI(ctx, args, nil, &output, &log)
+			if code != 0 || progressChildOutput(output.String()) != progressChildLines || strings.Contains(output.String(), "pagetty:") {
+				t.Fatalf("code=%d output=%q diagnostics=%q", code, output.String(), log.String())
+			}
+			if strings.ContainsAny(log.String(), "\r\x1b") {
+				t.Fatalf("redirected stderr contains terminal controls: %q", log.String())
+			}
+			diagnostics := log.String()
+			for _, step := range []string{"Running command...", "Rendering 0/3 pages", "Rendering 1/3 pages",
+				"Rendering 2/3 pages", "Rendering 3/3 pages", "Saving 3 pages...",
+				"pagetty: Saved 3 " + strings.ToUpper(format) + " pages in "} {
+				_, rest, ok := strings.Cut(diagnostics, step)
+				if !ok {
+					t.Fatalf("missing or out-of-order %q: %q", step, diagnostics)
+				}
+				diagnostics = rest
+			}
+			if log.running.IsZero() || log.rendering.IsZero() || log.saving.IsZero() || log.output.IsZero() || len(imageFiles(t, dir, format)) != 3 {
+				t.Fatalf("missing timing checkpoint or saved pages: %s", log.String())
+			}
+			elapsed, err := time.ParseDuration(strings.TrimSpace(diagnostics))
+			if err != nil {
+				t.Fatalf("expected a single completion duration: %q", diagnostics)
+			}
+			// 絶対時間でなく、同じ実行で観測した区間と比べる。
+			const rounding = 5 * time.Millisecond
+			if excluded := log.output.Sub(log.running) - elapsed; excluded+rounding < cliTestCommandWait {
+				t.Errorf("command wait was included: displayed %s, total %s", elapsed, log.output.Sub(log.running))
+			}
+			if minimum := log.saving.Sub(log.rendering); elapsed+rounding < minimum {
+				t.Errorf("rendering or saving phase was excluded: displayed %s, minimum %s", elapsed, minimum)
+			}
+		})
+	}
+}
+
+func TestCompletionDuration(t *testing.T) {
+	for _, tt := range []struct {
+		elapsed time.Duration
+		want    string
+	}{
+		{0, "<1ms"},
+		{900 * time.Microsecond, "<1ms"},
+		{time.Millisecond, "1ms"},
+		{419600 * time.Microsecond, "420ms"},
+		{999499 * time.Microsecond, "999ms"},
+		{999500 * time.Microsecond, "1s"},
+		{time.Second, "1s"},
+		{1005 * time.Millisecond, "1.01s"},
+		{1778 * time.Millisecond, "1.78s"},
+		{59999 * time.Millisecond, "1m0s"},
+		{time.Minute + 1234*time.Millisecond, "1m1.23s"},
+	} {
+		if got := completionDuration(tt.elapsed); got != tt.want {
+			t.Errorf("duration %s: got %q, want %q", tt.elapsed, got, tt.want)
+		}
+	}
+}
+
 func TestCLIArgumentsAndTerminalSize(t *testing.T) {
 	dir := t.TempDir()
 	want := []string{"with space", "", "; echo bad", "$(echo bad)", "日本語", `a"b`, `end\`, "--help", "--format", "--"}
@@ -239,7 +350,7 @@ func TestCLIDefaultDirectoryAndEmptyOutput(t *testing.T) {
 	}{
 		{[]string{"--help"}, 0},
 		{cliArgs(nil, "empty"), 0},
-		{[]string{"capture", "--", filepath.Join(dir, "missing-command")}, 1},
+		{[]string{"--", filepath.Join(dir, "missing-command")}, 1},
 	} {
 		code, _, diagnostics := runTestCLI(t, tc.args)
 		if code != tc.code {
@@ -295,6 +406,12 @@ func TestCLINonzeroAndFailures(t *testing.T) {
 			if code != tc.code || !strings.Contains(diagnostics, tc.message) || len(imageFiles(t, dir, "png")) != tc.pages {
 				t.Fatalf("code=%d diagnostics=%q", code, diagnostics)
 			}
+			if strings.Contains(diagnostics, "pagetty: Saved ") {
+				t.Fatalf("normal completion reported with exit code %d: %q", code, diagnostics)
+			}
+			if tc.pages > 0 && !strings.Contains(diagnostics, "Command failed; saved 1 PNG page in ") {
+				t.Fatalf("saved failure record not reported: %q", diagnostics)
+			}
 			if tc.pages == 0 {
 				if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
 					t.Fatalf("render failure created output directory: %v", err)
@@ -308,7 +425,7 @@ func TestCLINonzeroAndFailures(t *testing.T) {
 		t.Fatal(err)
 	}
 	code, _, diagnostics := runTestCLI(t, cliArgs([]string{"--output-dir", blocker}, "nonzero"))
-	if code != 1 || !strings.Contains(diagnostics, "画像保存失敗（0/1ページ保存）") || !strings.Contains(diagnostics, "終了コード 7") || strings.Contains(diagnostics, "画像を保存しました") {
+	if code != 1 || !strings.Contains(diagnostics, "画像保存失敗（0/1ページ保存）") || !strings.Contains(diagnostics, "終了コード 7") || strings.Contains(diagnostics, "pagetty: Saved ") {
 		t.Fatalf("code=%d diagnostics=%q", code, diagnostics)
 	}
 	data, err := os.ReadFile(blocker)
@@ -354,6 +471,9 @@ func TestCLIPartialRecords(t *testing.T) {
 			if code != wantCode || !strings.Contains(diagnostics.String(), "PTY実行・記録失敗") || !strings.Contains(diagnostics.String(), message) || len(paths) != 1 || !strings.Contains(paths[0], "-partial_001") {
 				t.Fatalf("code=%d paths=%v diagnostics=%q", code, paths, diagnostics.String())
 			}
+			if !strings.Contains(diagnostics.String(), "Partial capture: 1 PNG page in ") || strings.Contains(diagnostics.String(), "pagetty: Saved ") {
+				t.Fatalf("incorrect partial capture summary: %q", diagnostics.String())
+			}
 			readImage(t, paths[0])
 		})
 	}
@@ -368,7 +488,7 @@ func TestCLIInterruptedSaveFailure(t *testing.T) {
 	defer cancel()
 	var diagnostics bytes.Buffer
 	code := runCLI(ctx, cliArgs([]string{"--output-dir", path}, "block"), nil, cancelOutput{cancel}, &diagnostics)
-	if code != 1 || !strings.Contains(diagnostics.String(), "中断されました") || !strings.Contains(diagnostics.String(), "画像保存失敗") || strings.Contains(diagnostics.String(), "画像を保存しました") {
+	if code != 1 || !strings.Contains(diagnostics.String(), "中断されました") || !strings.Contains(diagnostics.String(), "画像保存失敗") || strings.Contains(diagnostics.String(), "pagetty: Saved ") || strings.Contains(diagnostics.String(), "Partial capture:") {
 		t.Fatalf("code=%d diagnostics=%q", code, diagnostics.String())
 	}
 }
@@ -380,7 +500,7 @@ func TestCLIProcessExitCode(t *testing.T) {
 	}{{"text", 0}, {"nonzero", 7}, {"invalid", 2}} {
 		args := cliArgs([]string{"--output-dir", t.TempDir()}, tc.mode)
 		if tc.mode == "invalid" {
-			args = []string{"capture", "--invalid"}
+			args = []string{"--invalid"}
 		}
 		exe, err := os.Executable()
 		if err != nil {
@@ -435,7 +555,7 @@ func (w *consoleResponder) Write(p []byte) (int, error) {
 }
 
 func TestCLIReportDefaults(t *testing.T) {
-	code, help, _ := runTestCLI(t, []string{"capture", "--help"})
+	code, help, _ := runTestCLI(t, []string{"--help"})
 	if code != 0 || !strings.Contains(help, "default 80") || !strings.Contains(help, "default 44") {
 		t.Fatalf("help: %s", help)
 	}

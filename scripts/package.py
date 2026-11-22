@@ -37,6 +37,11 @@ def main():
             files = [(executable, binary.read_bytes(), 0o755)]
             files += [(name, (root / name).read_bytes(), 0o644)
                       for name in ["LICENSE", "THIRD_PARTY_NOTICES.txt", "README.md"]]
+            if target == "windows":
+                installer = (root / "scripts/install.cmd").read_bytes().replace(b"\r\n", b"\n")
+                files.append(("install.cmd", installer.replace(b"\n", b"\r\n"), 0o644))
+            else:
+                files.append(("install.sh", (root / "scripts/install.sh").read_bytes(), 0o755))
             archive = out / ("pagetty-" + target + "-amd64" + suffix)
             if target == "windows":
                 with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as z:

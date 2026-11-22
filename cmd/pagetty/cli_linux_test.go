@@ -73,7 +73,7 @@ func TestCLIUnixInteractionAndCtrlC(t *testing.T) {
 
 func TestCLIUnixSignalExit(t *testing.T) {
 	dir := t.TempDir()
-	code, _, diagnostics := runTestCLI(t, []string{"capture", "--output-dir", dir, "--", "/bin/sh", "-c", "printf before; kill -KILL $$"})
+	code, _, diagnostics := runTestCLI(t, []string{"--output-dir", dir, "--", "/bin/sh", "-c", "printf before; kill -KILL $$"})
 	if code != 1 || !strings.Contains(diagnostics, "終了コードを取得できません") || len(imageFiles(t, dir, "png")) != 1 {
 		t.Fatalf("code=%d diagnostics=%q", code, diagnostics)
 	}
@@ -95,7 +95,7 @@ func TestCLIUnixProcessSignals(t *testing.T) {
 			if mode == "closed stdout" {
 				maxLines = "1"
 			}
-			args := []string{"capture", "--columns", "20", "--max-lines", maxLines, "--output-dir", dir, "--", "/bin/sh", "-c"}
+			args := []string{"--columns", "20", "--max-lines", maxLines, "--output-dir", dir, "--", "/bin/sh", "-c"}
 			script := "printf 'ready\\n'"
 			wantCode, wantPages := 0, 1
 			if mode == "child SIGPIPE" {
@@ -146,7 +146,11 @@ func TestCLIUnixProcessSignals(t *testing.T) {
 				defer reader.Close()
 				ready := make(chan string, 1)
 				go func() {
-					line, _ := bufio.NewReader(reader).ReadString('\n')
+					lines := bufio.NewReader(reader)
+					line, _ := lines.ReadString('\n')
+					if mode == "Ctrl+C" && strings.HasPrefix(line, "pagetty: ") {
+						line, _ = lines.ReadString('\n')
+					}
 					ready <- line
 				}()
 				select {
@@ -208,7 +212,7 @@ func TestCLIUnixProcessSignals(t *testing.T) {
 					t.Fatalf("child SIGPIPE changed: output=%q diagnostics=%q", output.String(), diagnostics.String())
 				}
 			case "closed stdout":
-				if !strings.Contains(diagnostics.String(), "PTY実行・記録失敗") || !strings.Contains(diagnostics.String(), "broken pipe") || !strings.Contains(diagnostics.String(), "2ページのpng画像を保存しました") {
+				if !strings.Contains(diagnostics.String(), "PTY実行・記録失敗") || !strings.Contains(diagnostics.String(), "broken pipe") || !strings.Contains(diagnostics.String(), "Partial capture: 2 PNG pages in ") {
 					t.Fatalf("write failure or save result not reported: %q", diagnostics.String())
 				}
 			case "Ctrl+C":

@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
 	"errors"
 	"flag"
 	"fmt"
@@ -10,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/cludewn/pagetty/internal/capture"
@@ -20,39 +20,30 @@ import (
 const usage = `PageTTY — 対話型CLIの実行結果を画像として保存します。
 
 使い方:
-  pagetty capture [options] -- <command> [args...]
-  pagetty capture --help
+  pagetty [options] -- <command> [args...]
+  pagetty --help
 `
 
-var errRedirectedInput = errors.New("PageTTY自身へのパイプ・ファイル入力は非対応です。実端末を使用するか、子シェル内で < input.txt を指定してください（capture --help参照）")
+var errRedirectedInput = errors.New("PageTTY自身へのパイプ・ファイル入力は非対応です。実端末を使用するか、子シェル内で < input.txt を指定してください（pagetty --help参照）")
 
 func runCLI(ctx context.Context, args []string, input *os.File, output, diagnostics io.Writer) int {
-	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
-		fmt.Fprint(output, usage)
-		return 0
-	}
-	if len(args) == 0 || args[0] != "capture" {
-		fmt.Fprint(diagnostics, usage)
-		return 2
-	}
-	args = args[1:]
-	flags := flag.NewFlagSet("capture", flag.ContinueOnError)
+	flags := flag.NewFlagSet("pagetty", flag.ContinueOnError)
 	flags.SetOutput(diagnostics)
 	format := flags.String("format", "png", "画像形式: png または svg")
 	columns := flags.Int("columns", 80, "端末の表示列数 (2〜32767、画像寸法の上限あり)")
 	maxLines := flags.Int("max-lines", 44, "画像1枚あたりの最大表示行数 (正の整数)")
 	outputDir := flags.String("output-dir", "./captures/", "起動元を基準とした画像保存先")
-	flags.Usage = func() {
+	printHelp := func() {
 		flags.SetOutput(output)
 		fmt.Fprint(flags.Output(), usage)
 		fmt.Fprintln(flags.Output(), "\nオプション:")
 		flags.PrintDefaults()
 		fmt.Fprintln(flags.Output(), `
 例:
-  pagetty capture -- ./a.out
-  pagetty capture --format svg --output-dir ./results -- python main.py
-  pagetty capture -- sh -c 'exec ./a.out < input.txt'
-  pagetty capture -- cmd.exe /d /c ".\a.exe < input.txt"
+  pagetty -- ./a.out
+  pagetty --format svg --output-dir ./results -- python main.py
+  pagetty -- sh -c 'exec ./a.out < input.txt'
+  pagetty -- cmd.exe /d /c ".\a.exe < input.txt"
 
 コマンドと引数はシェル展開せずに渡します。
 PTY行数は実端末から取得し、取得できなければ24行を使用します。
@@ -62,19 +53,18 @@ PageTTY自身へのパイプ・ファイル入力は非対応です。入力フ�
 終了コード: 対象のコードを引継ぎ、引数不正2、ツール側失敗1、中断130。
 画像生成・保存の失敗は中断や対象のコードより優先します。`)
 	}
-	separator := slices.Index(args, "--")
-	optionArgs := args
-	if separator >= 0 {
-		optionArgs = args[:separator]
+	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
+		printHelp()
+		return 0
 	}
-	if err := flags.Parse(optionArgs); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			return 0
-		}
+	flags.Usage = func() { fmt.Fprint(diagnostics, usage) }
+	separator := slices.Index(args, "--")
+	if separator < 0 || separator+1 >= len(args) || args[separator+1] == "" {
+		fmt.Fprintln(diagnostics, "pagetty: 引数エラー: -- の後に実行コマンドを指定してください")
 		return 2
 	}
-	if separator < 0 || flags.NArg() != 0 || separator+1 >= len(args) || args[separator+1] == "" {
-		fmt.Fprintln(diagnostics, "pagetty: 引数エラー: -- の後に実行コマンドを指定してください")
+	if err := flags.Parse(args[:separator]); err != nil || flags.NArg() != 0 {
+		fmt.Fprintln(diagnostics, "pagetty: 引数エラー: -- の前にはオプションだけを指定してください")
 		return 2
 	}
 	if (*format != "png" && *format != "svg") || *columns < 2 || *columns > 32767 || *maxLines < 1 || *outputDir == "" {
@@ -91,7 +81,8 @@ PageTTY自身へのパイプ・ファイル入力は非対応です。入力フ�
 		fmt.Fprintf(diagnostics, "pagetty: 保存先の解決失敗: %v\n", err)
 		return 1
 	}
-	prefix := "capture-" + time.Now().Format("20060102-150405.000000000-0700") + "-" + rand.Text()
+	started := time.Now()
+	fmt.Fprintln(diagnostics, "pagetty: Running command...")
 	rows := terminalRows(input, output)
 	result, captureErr := capture.Run(ctx, args[separator+1:], capture.Options{
 		Columns: *columns, Rows: rows, Input: input, Output: output,
@@ -114,31 +105,53 @@ PageTTY自身へのパイプ・ファイル入力は非対応です。入力フ�
 	} else if code != 0 {
 		fmt.Fprintf(diagnostics, "pagetty: 対象プログラムの終了失敗: 終了コード %d\n", code)
 	}
-	if captureErr != nil || result.Interrupted {
-		prefix += "-partial"
-		if !result.Interrupted {
-			code = 1
-		}
+	partial := captureErr != nil || result.Interrupted
+	if captureErr != nil && !result.Interrupted {
+		code = 1
 	}
 	if len(result.Document.Rows) == 0 {
-		fmt.Fprintln(diagnostics, "pagetty: 記録された表示がないため画像を保存しませんでした")
+		fmt.Fprintln(diagnostics, "pagetty: No visible output to save.")
 		return code
 	}
-	images, err := render.Render(result.Document, render.Options{Format: render.Format(*format), MaxLines: *maxLines})
+	renderStart := time.Now()
+	update, stop := startRenderProgress(diagnostics, renderTerminalWidth(diagnostics), renderStart)
+	images, err := render.Render(result.Document, render.Options{
+		Format: render.Format(*format), MaxLines: *maxLines, Progress: update,
+	})
+	stop()
 	if err != nil {
 		fmt.Fprintf(diagnostics, "pagetty: レンダリング失敗: %v\n", err)
 		return 1
 	}
-	paths, err := saveImages(dir, prefix, images)
+	fmt.Fprintf(diagnostics, "pagetty: Saving %d %s...\n", len(images), pageWord(len(images)))
+	paths, err := saveImages(dir, started.Format("20060102-150405"), partial, images)
+	elapsed := time.Since(result.CommandEndedAt)
 	for _, path := range paths {
-		fmt.Fprintf(diagnostics, "pagetty: 保存: %s\n", path)
+		fmt.Fprintf(diagnostics, "pagetty: Output: %s\n", path)
 	}
 	if err != nil {
 		fmt.Fprintf(diagnostics, "pagetty: 画像保存失敗（%d/%dページ保存）: %v\n", len(paths), len(images), err)
 		return 1
 	}
-	fmt.Fprintf(diagnostics, "pagetty: %dページの%s画像を保存しました\n", len(paths), *format)
+	label := "Saved"
+	if partial {
+		label = "Partial capture:"
+	} else if code != 0 {
+		label = "Command failed; saved"
+	}
+	fmt.Fprintf(diagnostics, "pagetty: %s %d %s %s in %s\n",
+		label, len(paths), strings.ToUpper(*format), pageWord(len(paths)), completionDuration(elapsed))
 	return code
+}
+
+func completionDuration(elapsed time.Duration) string {
+	if elapsed < time.Millisecond {
+		return "<1ms"
+	}
+	if elapsed < time.Second {
+		return elapsed.Round(time.Millisecond).String()
+	}
+	return elapsed.Round(10 * time.Millisecond).String()
 }
 
 func terminalRows(input *os.File, output io.Writer) int {
