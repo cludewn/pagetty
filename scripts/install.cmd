@@ -3,7 +3,7 @@ setlocal DisableDelayedExpansion
 set "PAGETTY_SETUP=%~f0"
 set "PAGETTY_UNINSTALL="
 if /i "%~nx0"=="uninstall.cmd" set "PAGETTY_UNINSTALL=1"
-set "PAGETTY_COMMAND=$status = 0; try { $text = [IO.File]::ReadAllText($env:PAGETTY_SETUP); $marker = [char]10 + ':payload'; $offset = $text.IndexOf($marker); if ($offset -lt 0) { throw 'Setup payload is missing.' }; & ([scriptblock]::Create($text.Substring($offset + $marker.Length))) } catch { [Console]::Error.WriteLine($_.Exception.Message); $status = 1 }; if ($env:PAGETTY_UNINSTALL -eq '1') { try { $null = Read-Host 'Press Enter to close' } catch {} }; exit $status"
+set "PAGETTY_COMMAND=$status = 0; try { $text = [IO.File]::ReadAllText($env:PAGETTY_SETUP); $marker = [char]10 + ':payload'; $offset = $text.IndexOf($marker); if ($offset -lt 0) { throw 'Setup payload is missing.' }; $status = & ([scriptblock]::Create($text.Substring($offset + $marker.Length))) } catch { [Console]::Error.WriteLine($_.Exception.Message); $status = 1 }; if ($env:PAGETTY_UNINSTALL -eq '1') { try { $null = Read-Host 'Press Enter to close' } catch {} }; exit $status"
 if defined PAGETTY_UNINSTALL (
     start "PageTTY uninstall" /d "%SystemRoot%" "%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -Command "%PAGETTY_COMMAND%"
     if errorlevel 1 (
@@ -14,6 +14,10 @@ if defined PAGETTY_UNINSTALL (
     exit /b 0
 )
 "%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command "%PAGETTY_COMMAND%"
+if errorlevel 2 (
+    pause
+    exit /b 2
+)
 if errorlevel 1 (
     echo PageTTY setup failed.
     pause
@@ -58,19 +62,45 @@ function Get-PathHash($value) {
     } finally { $sha.Dispose() }
 }
 
-function Get-PathPlan($before, [string]$effective, $dir, $ownership, [bool]$uninstall) {
-    $plan = @{ Value = $before; Change = $false; Ownership = $ownership; Manual = $false }
-    if ($uninstall) {
-        if (!$ownership) { return $plan }
-        $entries = $before.Raw.Split(';')
-        $matches = @($entries | Where-Object { $_ -ieq $dir })
-        if ($ownership.Hash -cne (Get-PathHash $before) -or $matches.Count -ne 1 -or $entries[-1] -cne $dir) {
+function Get-PathPlan($before, [string]$effective, $dir, $ownership, [bool]$uninstall, [int]$version = 2) {
+    $plan = @{ Value = $before; Change = $false; Ownership = $ownership; Manual = $false; Version = $version }
+    if ($ownership) {
+        if ($ownership.Kind -ceq 'Absent' -and
+            ($ownership.Hash -ine (Get-PathHash @{ Kind = 'String'; Raw = $dir }) -or
+             ($version -eq 2 -and $ownership.BeforeHash -ine (Get-PathHash @{ Kind = 'Absent'; Raw = '' })))) {
+            throw 'Inconsistent PATH ownership record.'
+        }
+        if ($ownership.Hash -ine (Get-PathHash $before)) {
             $plan.Manual = $true
             return $plan
         }
+        if ($before.Kind -eq 'Absent') { throw 'Inconsistent PATH ownership record.' }
+        $entries = $before.Raw.Split(';')
+        $matches = @($entries | Where-Object { $_ -ieq $dir })
+        if ($matches.Count -ne 1 -or $entries[-1] -cne $dir) {
+            throw 'Inconsistent PATH ownership record.'
+        }
         $previous = $before.Raw.Substring(0, [Math]::Max(0, $before.Raw.Length - $dir.Length - 1))
-        $plan.Value = @{ Kind = $ownership.Kind; Raw = $previous }
-    } else {
+        $prior = @{ Kind = $ownership.Kind; Raw = $previous }
+        $expectedKind = if ($prior.Kind -ceq 'Absent') { 'String' } else { $prior.Kind }
+        if ($before.Kind -cne $expectedKind -or
+            (!$previous -and $before.Raw -cne $dir) -or
+            ($prior.Kind -ceq 'Absent' -and $before.Raw -cne $dir) -or
+            ($version -eq 2 -and $ownership.BeforeHash -ine (Get-PathHash $prior))) {
+            throw 'Inconsistent PATH ownership record.'
+        }
+        if ($uninstall) {
+            # The old format cannot distinguish an absent PATH from an empty REG_SZ.
+            if ($version -eq 1 -and $prior.Kind -ceq 'Absent') {
+                $plan.Manual = $true
+                return $plan
+            }
+            $plan.Value = $prior
+            $plan.Change = $true
+        }
+        return $plan
+    }
+    if (!$uninstall) {
         foreach ($entry in $effective.Split(';') + $before.Raw.Split(';')) {
             $candidate = $entry.Trim().Trim([char]34).Replace('/', '\').TrimEnd('\')
             if ($candidate -ieq $dir) { return $plan }
@@ -83,10 +113,24 @@ function Get-PathPlan($before, [string]$effective, $dir, $ownership, [bool]$unin
         if ($raw.Length -gt 32767) { throw 'The user Path would exceed the Windows environment limit.' }
         $kind = if ($before.Kind -eq 'Absent') { 'String' } else { $before.Kind }
         $plan.Value = @{ Kind = $kind; Raw = $raw }
-        $plan.Ownership = @{ Kind = $before.Kind; Hash = (Get-PathHash $plan.Value) }
+        $plan.Ownership = @{ Kind = $before.Kind; Hash = (Get-PathHash $plan.Value); BeforeHash = (Get-PathHash $before) }
+        $plan.Version = 2
+        $plan.Change = $true
     }
-    $plan.Change = $true
     $plan
+}
+
+function Assert-RecordFields($value, [string[]]$fields, $message) {
+    if ($value -isnot [System.Management.Automation.PSCustomObject]) { throw $message }
+    $names = @($value.PSObject.Properties | ForEach-Object Name)
+    if ($names.Count -ne $fields.Count) { throw $message }
+    foreach ($name in $fields) {
+        if ($names -cnotcontains $name) { throw $message }
+    }
+}
+
+function Test-Sha256($value) {
+    $value -is [string] -and $value -cmatch '\A[0-9A-Fa-f]{64}\z'
 }
 
 function Get-InstalledState($dir) {
@@ -100,20 +144,33 @@ function Get-InstalledState($dir) {
     }
     $path = Join-Path $dir $record
     Assert-PlainFile $path
-    $state = [IO.File]::ReadAllText($path) | ConvertFrom-Json
-    if ($state.Version -ne 1 -or @($state.Files.PSObject.Properties).Count -ne $payload.Count) {
-        throw "Unknown installation record: $path"
+    $json = [IO.File]::ReadAllText($path)
+    $invalid = "Invalid installation record: $path"
+    if ($json -notmatch '\A\s*\{') { throw $invalid }
+    $state = ConvertFrom-Json -InputObject $json
+    Assert-RecordFields $state @('Version','Files','Path') $invalid
+    if (($state.Version -isnot [int] -and $state.Version -isnot [long]) -or $state.Version -notin @(1,2)) {
+        throw $invalid
+    }
+    Assert-RecordFields $state.Files $payload $invalid
+    if ($null -ne $state.Path) {
+        $fields = @('Kind','Hash')
+        if ($state.Version -eq 2) { $fields += 'BeforeHash' }
+        Assert-RecordFields $state.Path $fields 'Invalid PATH ownership record.'
+        if ($state.Path.Kind -isnot [string] -or $state.Path.Kind -cnotin @('Absent','String','ExpandString') -or
+            !(Test-Sha256 $state.Path.Hash) -or ($state.Version -eq 2 -and !(Test-Sha256 $state.Path.BeforeHash))) {
+            throw 'Invalid PATH ownership record.'
+        }
     }
     foreach ($name in $payload) {
         $path = Join-Path $dir $name
+        $expected = $state.Files.PSObject.Properties[$name].Value
+        if (!(Test-Sha256 $expected)) { throw "Invalid SHA-256 in installation record for $name." }
         Assert-PlainFile $path
-        $expected = $state.Files.PSObject.Properties[$name]
-        if (!$expected -or $expected.Value -cne (Get-FileHash -LiteralPath $path).Hash) {
+        if ($expected -ine (Get-FileHash -LiteralPath $path).Hash) {
             throw "Managed file has changed: $path"
         }
     }
-    if ($state.Path -and ($state.Path.Kind -notin @('Absent','String','ExpandString') -or
-        $state.Path.Hash -cnotmatch '^[0-9A-F]{64}$')) { throw 'Invalid PATH ownership record.' }
     $state
 }
 
@@ -139,12 +196,15 @@ function Invoke-PageTTYSetup($root, $source, $launcher, $key, $effective, [bool]
     $movedOld = $false
     $placedNew = $false
     $attemptedPath = $false
+    $committed = $false
+    $cleanupError = $null
     try {
         $state = Get-InstalledState $dir
-        if (!$state -and $uninstall) { Write-Host 'PageTTY is not installed.'; return }
+        if (!$state -and $uninstall) { Write-Host 'PageTTY is not installed.'; return 0 }
         $before = Read-Path $key
         if (!$uninstall -and $null -eq $effective) { $effective = Read-EffectivePath }
-        $plan = Get-PathPlan $before $effective $dir $state.Path $uninstall
+        $version = if ($state) { $state.Version } else { 2 }
+        $plan = Get-PathPlan $before $effective $dir $state.Path $uninstall $version
         if (!$uninstall) {
             $sources = @{}
             foreach ($name in $payload) {
@@ -159,7 +219,7 @@ function Invoke-PageTTYSetup($root, $source, $launcher, $key, $effective, [bool]
                 Copy-PayloadFile $sources[$name] $target
                 $hashes[$name] = (Get-FileHash -LiteralPath $target).Hash
             }
-            Save-Record (Join-Path $stage $record) @{ Version = 1; Files = $hashes; Path = $plan.Ownership }
+            Save-Record (Join-Path $stage $record) @{ Version = $plan.Version; Files = $hashes; Path = $plan.Ownership }
         }
         if ($state) {
             $null = Get-InstalledState $dir
@@ -177,6 +237,7 @@ function Invoke-PageTTYSetup($root, $source, $launcher, $key, $effective, [bool]
             $attemptedPath = $true
             Write-Path $key $plan.Value
         }
+        $committed = $true
     } catch {
         $failure = $_
         $restoreErrors = @()
@@ -197,21 +258,31 @@ function Invoke-PageTTYSetup($root, $source, $launcher, $key, $effective, [bool]
         }
         throw $failure
     } finally {
+        if ($committed -and $plan.Change) { Send-PathNotification $uninstall }
         if (!$keepWork) {
             try {
                 Clear-Payload $stage
                 if ($movedOld -and [IO.Directory]::Exists($backup)) { $null = Get-InstalledState $backup }
                 Clear-Payload $backup
                 [IO.Directory]::Delete($work)
-            } catch { throw "Could not remove setup files in $work. Inspect before retrying. $($_.Exception.Message)" }
+            } catch {
+                $cleanupError = "Cleanup failed. Remaining setup files: $work. $($_.Exception.Message)"
+                if ([IO.Directory]::Exists($backup)) { $cleanupError += " Retired installation: $backup." }
+                if (!$committed) { throw $cleanupError }
+            }
         }
     }
     if ($plan.Manual) {
-        Write-Warning "User PATH changed since setup and was left untouched. In user Environment Variables, review the PageTTY entry: $dir"
+        Write-Warning "User PATH ownership could not be confirmed. PATH was left untouched. In user Environment Variables, review the PageTTY entry: $dir"
+    }
+    if ($cleanupError) {
+        $operation = if ($uninstall) { 'Uninstall' } else { 'Install' }
+        Write-Warning "$operation applied. $cleanupError"
+        return 2
     }
     if ($uninstall) { Write-Host 'PageTTY removed.' }
     else { Write-Host "Installed: $dir\pagetty.exe"; Write-Host 'Try: pagetty --help' }
-    return $plan.Change
+    return 0
 }
 
 function Initialize-Native {
@@ -242,6 +313,15 @@ function Read-EffectivePath {
     }
 }
 
+function Send-PathNotification([bool]$uninstall) {
+    try {
+        if ($uninstall) { Initialize-Native }
+        $result = [UIntPtr]::Zero
+        $sent = [PageTTY.Native]::SendMessageTimeout([IntPtr]0xffff, 0x1a, [UIntPtr]::Zero, 'Environment', 2, 1000, [ref]$result)
+        if ($sent -eq [IntPtr]::Zero) { Write-Warning 'Windows did not confirm the PATH refresh.' }
+    } catch { Write-Warning 'Windows did not confirm the PATH refresh.' }
+}
+
 # Command entry point
 $root = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
 if (!$root -or $root -match '[;%]') { throw 'Unsupported LocalAppData location.' }
@@ -255,14 +335,7 @@ if (!$uninstall) { Initialize-Native }
 $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
 if (!$key) { throw 'Cannot open the user Environment registry key for writing.' }
 try {
-    $changed = Invoke-PageTTYSetup $root ([IO.Path]::GetDirectoryName($env:PAGETTY_SETUP)) $env:PAGETTY_SETUP $key $null $uninstall
+    $status = Invoke-PageTTYSetup $root ([IO.Path]::GetDirectoryName($env:PAGETTY_SETUP)) $env:PAGETTY_SETUP $key $null $uninstall
 } finally { $key.Dispose() }
-if ($changed) {
-    try {
-        if ($uninstall) { Initialize-Native }
-        $result = [UIntPtr]::Zero
-        $sent = [PageTTY.Native]::SendMessageTimeout([IntPtr]0xffff, 0x1a, [UIntPtr]::Zero, 'Environment', 2, 1000, [ref]$result)
-        if ($sent -eq [IntPtr]::Zero) { Write-Warning 'Windows did not confirm the PATH refresh.' }
-    } catch { Write-Warning 'Windows did not confirm the PATH refresh.' }
-}
 Write-Host 'Close and reopen your terminal. If PATH is stale, sign out and back in.'
+return $status

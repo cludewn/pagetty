@@ -19,6 +19,8 @@ $code = $text.Substring($offset + $marker.Length)
 $null = [scriptblock]::Create($code)
 . ([scriptblock]::Create(($code -split '(?m)^# Command entry point\r?$', 2)[0]))
 Initialize-Native
+$notifications = [Collections.Generic.List[bool]]::new()
+function Send-PathNotification([bool]$uninstall) { $notifications.Add($uninstall) }
 
 $base = Join-Path ([IO.Path]::GetTempPath()) ('PageTTY test [' + [guid]::NewGuid().ToString('N') + ']')
 $source = Join-Path $base 'extracted'
@@ -34,11 +36,13 @@ function New-FakeKey($kind, $raw) {
     $obj | Add-Member ScriptMethod GetValueKind { $this.Kind }
     $obj | Add-Member ScriptMethod GetValue {
         param($name, $default, $options)
+        if ($name -cne 'Path') { throw 'Unexpected registry value read' }
         if ($options -ne 'DoNotExpandEnvironmentNames') { throw 'Expected raw PATH read' }
         $this.Raw
     }
     $obj | Add-Member ScriptMethod SetValue {
         param($name, $value, $kind)
+        if ($name -cne 'Path') { throw 'Unexpected registry value write' }
         $this.Writes++
         if ($this.Fail -eq 'before') { throw 'Injected registry write failure' }
         $this.Kind = [string]$kind; $this.Raw = $value
@@ -47,7 +51,11 @@ function New-FakeKey($kind, $raw) {
             throw 'Injected registry write failure'
         }
     }
-    $obj | Add-Member ScriptMethod DeleteValue { $this.Writes++; $this.Kind = 'Absent'; $this.Raw = '' }
+    $obj | Add-Member ScriptMethod DeleteValue {
+        param($name, $throwOnMissing)
+        if ($name -cne 'Path') { throw 'Unexpected registry value delete' }
+        $this.Writes++; $this.Kind = 'Absent'; $this.Raw = ''
+    }
     $obj
 }
 
@@ -108,6 +116,46 @@ try {
         [IO.File]::WriteAllBytes($path, $original)
     }
 
+    $recordPath = Join-Path $dir '.pagetty-install'
+    $validRecord = [IO.File]::ReadAllText($recordPath)
+    $licensePath = Join-Path $dir 'LICENSE'
+    $license = [IO.File]::ReadAllBytes($licensePath)
+    [IO.File]::WriteAllText($licensePath, 'user license replacement')
+    $validLicenseHash = (ConvertFrom-Json $validRecord).Files.LICENSE
+    $invalidHashes = @('[]', 'null', '""', '42', '{}', '["x","y"]', ('["'+$validLicenseHash+'"]'), ('"'+('G'*64)+'"'),
+        ('"'+('0'*63)+'"'), ('"'+('0'*65)+'"'), ('"'+('0'*64)+'\n"'))
+    foreach ($invalidHash in $invalidHashes) {
+        [IO.File]::WriteAllText($recordPath, ($validRecord -creplace '"LICENSE":"[0-9A-F]{64}"', ('"LICENSE":'+$invalidHash)))
+        $snapshot = Snapshot
+        $writes = $key.Writes
+        Assert-Fails { Install $key $dir } 'Invalid SHA-256.*LICENSE'
+        Assert-Fails { Uninstall $key } 'Invalid SHA-256.*LICENSE'
+        Expect-Unchanged $key $registered $snapshot
+        Assert ($key.Writes -eq $writes) 'Invalid file hash reached registry write'
+    }
+    [IO.File]::WriteAllBytes($licensePath, $license)
+
+    foreach ($case in @('version-string','root-array','unknown-field','files-array','path-array','kind-array','hash-array','before-null','before-missing')) {
+        $entry = ConvertFrom-Json $validRecord
+        switch ($case) {
+            version-string { $entry.Version = '2' }
+            root-array { $entry = @($entry) }
+            unknown-field { $entry | Add-Member NoteProperty Extra 0 }
+            files-array { $entry.Files = @($entry.Files) }
+            path-array { $entry.Path = @() }
+            kind-array { $entry.Path.Kind = @('ExpandString') }
+            hash-array { $entry.Path.Hash = @($entry.Path.Hash) }
+            before-null { $entry.Path.BeforeHash = $null }
+            before-missing { $entry.Path.PSObject.Properties.Remove('BeforeHash') }
+        }
+        Save-Record $recordPath $entry
+        $snapshot = Snapshot
+        Assert-Fails { Install $key $dir } 'Invalid .*record'
+        Assert-Fails { Uninstall $key } 'Invalid .*record'
+        Expect-Unchanged $key $registered $snapshot
+    }
+    [IO.File]::WriteAllText($recordPath, $validRecord)
+
     Set-Version second
     & {
         function Copy-PayloadFile($from, $to) {
@@ -162,6 +210,87 @@ try {
         Assert ($key.Writes -eq 1) 'An ambiguous PATH was rewritten'
     }
 
+    # A corrupted prior kind cannot delete an existing nonempty or empty PATH.
+    foreach ($case in @(@{Kind='String'; Raw='C:\Keep;C:\User'}, @{Kind='String'; Raw=''}, @{Kind='ExpandString'; Raw=''})) {
+        $value = $case.Raw
+        $key = New-FakeKey $case.Kind $value
+        $null = Install $key $value
+        $before = Get-PathHash (Read-Path $key)
+        $validRecord = [IO.File]::ReadAllText($recordPath)
+        $entry = ConvertFrom-Json $validRecord
+        $entry.Path.Kind = 'Absent'
+        Save-Record $recordPath $entry
+        $snapshot = Snapshot
+        Assert-Fails { Uninstall $key } 'Inconsistent PATH ownership record'
+        Assert-Fails { Install $key $dir } 'Inconsistent PATH ownership record'
+        Expect-Unchanged $key $before $snapshot
+        Assert ($key.Writes -eq 1) 'Corrupt PATH ownership reached registry write'
+        $installedValue = $key.Raw
+        $key.Raw += ';C:\Added after installation'
+        $manuallyEdited = Get-PathHash (Read-Path $key)
+        Assert-Fails { Uninstall $key } 'Inconsistent PATH ownership record'
+        Expect-Unchanged $key $manuallyEdited $snapshot
+        $key.Raw = $installedValue
+        [IO.File]::WriteAllText($recordPath, $validRecord)
+        $null = Uninstall $key
+        Assert ($key.Raw -ceq $value -and $key.Kind -ceq $case.Kind) 'Existing PATH should be restored'
+    }
+
+    $key = New-FakeKey String 'C:\Keep'
+    $null = Install $key 'C:\Keep'
+    $before = Get-PathHash (Read-Path $key)
+    $validRecord = [IO.File]::ReadAllText($recordPath)
+    $entry = ConvertFrom-Json $validRecord
+    $entry.Path.Kind = 'ExpandString'
+    $entry.Path.BeforeHash = Get-PathHash @{ Kind = 'ExpandString'; Raw = 'C:\Keep' }
+    Save-Record $recordPath $entry
+    $snapshot = Snapshot
+    Assert-Fails { Uninstall $key } 'Inconsistent PATH ownership record'
+    Expect-Unchanged $key $before $snapshot
+    [IO.File]::WriteAllText($recordPath, $validRecord)
+    $null = Uninstall $key
+
+    foreach ($kind in @('String', 'Absent')) {
+        $key = New-FakeKey $kind ''
+        $null = Install $key 'C:\Machine'
+        $entry = ConvertFrom-Json ([IO.File]::ReadAllText($recordPath))
+        $entry.Version = 1
+        $entry.Path.PSObject.Properties.Remove('BeforeHash')
+        Save-Record $recordPath $entry
+        $null = Install $key $dir
+        $null = Uninstall $key
+        $expected = if ($kind -eq 'Absent') { $dir } else { '' }
+        Assert ($key.Kind -ceq 'String' -and $key.Raw -ceq $expected) 'Legacy record attempted an unsafe delete or failed to restore an empty value'
+    }
+
+    $key = New-FakeKey ExpandString '%KEEP%;C:\User'
+    $null = Install $key 'C:\Keep;C:\User'
+    $priorBytes = [IO.File]::ReadAllBytes($recordPath)
+    $priorLicense = [IO.File]::ReadAllBytes($licensePath)
+    $beforeNotify = $notifications.Count
+    $clear = ${function:Clear-Payload}
+    & {
+        function Clear-Payload($path) {
+            if (![IO.Directory]::Exists($path) -or !$path.EndsWith('\old')) { & $clear $path; return }
+            $locked = [IO.File]::Open((Join-Path $path 'LICENSE'), 'Open', 'Read', 'None')
+            try { & $clear $path } finally { $locked.Dispose() }
+        }
+        $output = @(Uninstall $key 3>&1 6>&1)
+        $message = ($output | ForEach-Object { [string]$_ }) -join [char]10
+        $backup = Join-Path $work 'old'
+        Assert ($output[-1] -eq 2 -and $message -match 'Uninstall applied.*Cleanup failed') 'Cleanup failure status or message was misleading'
+        Assert ($message.Contains($work) -and $message.Contains($backup) -and $message -notmatch 'PageTTY removed') 'Missing precise cleanup warning'
+        Assert (![IO.Directory]::Exists($dir)) 'Committed uninstall was rolled back'
+        Assert ($key.Raw -ceq '%KEEP%;C:\User' -and $key.Kind -ceq 'ExpandString') 'PATH was not restored'
+        Assert ($notifications.Count -eq ($beforeNotify + 1) -and $notifications[-1]) 'Cleanup failure skipped the PATH notification'
+        Assert (![IO.File]::Exists((Join-Path $backup 'pagetty.exe'))) 'Cleanup failure was not after deleting the first file'
+        Assert ([Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $backup 'LICENSE'))) -ceq [Convert]::ToBase64String($priorLicense)) 'Locked file was not preserved'
+        Assert ([Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $backup '.pagetty-install'))) -ceq [Convert]::ToBase64String($priorBytes)) 'Cleanup continued and changed the record'
+        Assert ([IO.File]::Exists((Join-Path $backup 'THIRD_PARTY_NOTICES.txt'))) 'Cleanup continued past the failure'
+    }
+    # Discard the isolated backup left by the simulated failure before the next case.
+    [IO.Directory]::Delete($work, $true)
+
     $key = New-FakeKey String ('C:\Existing;' + $dir)
     $before = Get-PathHash (Read-Path $key)
     $null = Install $key $key.Raw
@@ -196,7 +325,8 @@ $ErrorActionPreference = 'Stop'
 if ($env:PAGETTY_UNINSTALL -ne '1') { throw 'Wrong worker mode.' }
 $folder = [IO.Path]::GetDirectoryName($env:PAGETTY_SETUP)
 [IO.Directory]::Move($folder, [IO.Path]::Combine([IO.Path]::GetDirectoryName($folder), 'launched'))
-Write-Output 'LAUNCHER WORKER OK'
+Write-Host 'LAUNCHER WORKER OK'
+return 0
 '@
     [IO.File]::WriteAllText($fake, (($header + [char]10 + $body) -replace '\r?\n', ([string][char]13 + [char]10)))
     $info = [Diagnostics.ProcessStartInfo]::new()
@@ -219,7 +349,20 @@ Write-Output 'LAUNCHER WORKER OK'
         $output = $stdout.Result + $stderr.Result
         Assert ($proc.ExitCode -eq 0 -and $output -match 'LAUNCHER WORKER OK' -and [IO.Directory]::Exists($moved)) $output
     } finally { $proc.Dispose() }
-    Write-Host 'Windows installer tests passed with temporary files, a fake registry and a batch fixture.'
+    # Exercise the synchronous launcher's exit status without running the installer payload.
+    $fake = Join-Path $base 'install.cmd'
+    $body = [char]10 + "Write-Warning 'Install applied. Cleanup failed.'; return 2"
+    [IO.File]::WriteAllText($fake, (($header + $body) -replace '\r?\n', ([string][char]13 + [char]10)))
+    $info.Arguments = '/d /c ""' + $fake + '""'
+    $proc = [Diagnostics.Process]::Start($info)
+    try {
+        $proc.StandardInput.WriteLine('')
+        $proc.StandardInput.Close()
+        if (!$proc.WaitForExit(15000)) { $proc.Kill(); throw 'Batch exit-code fixture timed out.' }
+        $output = $proc.StandardOutput.ReadToEnd() + $proc.StandardError.ReadToEnd()
+        Assert ($proc.ExitCode -eq 2 -and $output -match 'Cleanup failed' -and $output -notmatch 'PageTTY setup failed') $output
+    } finally { $proc.Dispose() }
+    Write-Host 'Windows installer tests passed with temporary files, a fake registry and batch fixtures.'
 
 } finally {
     [IO.Directory]::Delete($base, $true)

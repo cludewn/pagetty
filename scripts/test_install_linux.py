@@ -34,6 +34,7 @@ class InstallTest(unittest.TestCase):
         self.version("first")
         wrappers = {
             "install": """if [[ $FAIL_STEP == copy && $* == *THIRD_PARTY_NOTICES.txt* ]]; then exit 23; fi""",
+            "rm": """if [[ $FAIL_STEP == cleanup && $* == *'/old/LICENSE' ]]; then exit 23; fi""",
             "mv": """case "$FAIL_STEP:$*:@@{!#}" in
                 record:*'/manifest '*:*) exit 23 ;;
                 config:*'/apply/.profile '*:*) exit 23 ;;
@@ -152,6 +153,26 @@ class InstallTest(unittest.TestCase):
         before = self.snapshot()
         self.run_setup(uninstall=True, step="config", ok=False)
         self.assertEqual(self.snapshot(), before)
+
+    def test_cleanup_failure_keeps_committed_uninstall_and_backup(self):
+        original = self.snapshot()
+        self.run_setup()
+        before = self.snapshot()
+        result = self.run_setup(uninstall=True, step="cleanup", ok=False)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("Uninstall applied", result.stderr)
+        self.assertIn("Cleanup failed", result.stderr)
+        self.assertIn(str(self.work / "old"), result.stderr)
+        self.assertNotIn("PageTTY removed", result.stdout)
+        self.assertFalse(self.dest.exists())
+        after = self.snapshot()
+        for file in (".bashrc", ".profile"):
+            self.assertEqual(after[file], original[file])
+        before_dir = self.dest.relative_to(self.home)
+        after_dir = (self.work / "old").relative_to(self.home)
+        self.assertFalse((self.work / "old/pagetty").exists())
+        for file in ("LICENSE", "THIRD_PARTY_NOTICES.txt", "uninstall.sh", ".pagetty-install"):
+            self.assertEqual(after[str(after_dir / file)], before[str(before_dir / file)])
 
     def test_reports_incomplete_rollback(self):
         self.run_setup()

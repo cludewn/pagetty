@@ -20,7 +20,7 @@ payload=(pagetty LICENSE THIRD_PARTY_NOTICES.txt uninstall.sh)
 hook='case ":${PATH-}:" in *":$HOME/.local/share/pagetty:"*|*":$HOME/.local/share/pagetty/:"*) ;; *) export PATH="${PATH:+$PATH:}$HOME/.local/share/pagetty" ;; esac # PageTTY installer'
 configs=(.bashrc .bash_profile .bash_login .profile)
 owned=() planned=() applied=() created_dirs=()
-moved_old=0 placed_new=0
+moved_old=0 placed_new=0 committed=0
 
 hashes() { (cd -- "$1" && sha256sum -- "${payload[@]}"); }
 check_dir() { [[ -d $1 && ! -L $1 && -O $1 ]]; }
@@ -33,12 +33,36 @@ check_config() {
 
 mkdir -m 700 -- "$work" || fail "Another setup is active or recovery is needed: $work"
 
+clean_work() {
+    local name path
+    # 失敗した時点で停止し、残りの退避ファイルを保持する。
+    for path in "$work/old" "$work/new"; do
+        exists "$path" || continue
+        check_dir "$path" || return 1
+        if [[ $path == "$work/old" ]]; then
+            for name in "${payload[@]}" "$record"; do regular "$path/$name" || return 1; done
+            [[ $(find "$path" -mindepth 1 -maxdepth 1 -printf .) == ..... &&
+                $(cat -- "$path/$record") == "$(printf '%s\n' "${state[@]}")" &&
+                $(hashes "$path") == "$(printf '%s\n' "${state[@]:1:4}")" ]] || return 1
+        fi
+        for name in "${payload[@]}" "$record"; do rm -f -- "$path/$name" || return 1; done
+        rmdir -- "$path" || return 1
+    done
+    for path in "$work/before" "$work/after" "$work/apply"; do
+        exists "$path" || continue
+        check_dir "$path" || return 1
+        for name in "${configs[@]}"; do rm -f -- "$path/$name" || return 1; done
+        rmdir -- "$path" || return 1
+    done
+    rm -f -- "$work/hashes" "$work/manifest" && rmdir -- "$work"
+}
+
 finish() {
     local status=$? name rc broken=0 path
     trap - EXIT
     trap '' INT TERM
     set +e
-    if (( status )); then
+    if (( status && ! committed )); then
         for name in "${applied[@]}"; do
             rc="$HOME/$name"
             if ! regular "$rc" || ! cmp -s -- "$rc" "$work/after/$name"; then
@@ -58,27 +82,25 @@ finish() {
         printf 'PageTTY: Rollback incomplete. Recovery files are in %s\n' "$work" >&2
         exit 1
     fi
-    # 既知の名前だけを削除し、不明なファイルがあれば作業領域を残す。
-    for path in "$work/old" "$work/new"; do
-        exists "$path" || continue
-        if ! check_dir "$path"; then broken=1; continue; fi
-        if [[ $path == "$work/old" ]] && [[ $(hashes "$path") != "$(printf '%s\n' "${state[@]:1:4}")" ]]; then
-            broken=1
-            continue
+    if ! clean_work; then
+        if (( committed )); then
+            if [[ $mode == uninstall ]]; then
+                printf 'PageTTY: Uninstall applied. Open a new Bash terminal to refresh PATH.\n' >&2
+            else
+                printf 'PageTTY: Install applied.\n' >&2
+            fi
         fi
-        for name in "${payload[@]}" "$record"; do rm -f -- "$path/$name" || broken=1; done
-        rmdir -- "$path" || broken=1
-    done
-    for path in "$work/before" "$work/after" "$work/apply"; do
-        exists "$path" || continue
-        if ! check_dir "$path"; then broken=1; continue; fi
-        for name in "${configs[@]}"; do rm -f -- "$path/$name" || broken=1; done
-        rmdir -- "$path" || broken=1
-    done
-    rm -f -- "$work/hashes" "$work/manifest" || broken=1
-    if (( broken )) || ! rmdir -- "$work"; then
-        printf 'PageTTY: Could not clean up %s. Inspect before retrying.\n' "$work" >&2
+        printf 'PageTTY: Cleanup failed. Remaining setup files: %s\n' "$work" >&2
+        if exists "$work/old"; then printf 'PageTTY: Retired installation: %s\n' "$work/old" >&2; fi
+        if (( committed )); then exit 2; fi
         exit 1
+    fi
+    if (( committed )); then
+        if [[ $mode == install ]]; then
+            printf 'Installed: %s/pagetty\nOpen a new Bash terminal and run: pagetty --help\n' "$dir"
+        else
+            printf 'PageTTY removed. Open a new Bash terminal to refresh PATH.\n'
+        fi
     fi
     exit "$status"
 }
@@ -195,8 +217,4 @@ for name in "${changes[@]}"; do
     applied+=("$name")
 done
 
-if [[ $mode == install ]]; then
-    printf 'Installed: %s/pagetty\nOpen a new Bash terminal and run: pagetty --help\n' "$dir"
-else
-    printf 'PageTTY removed. Open a new Bash terminal to refresh PATH.\n'
-fi
+committed=1
