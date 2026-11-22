@@ -20,18 +20,18 @@ Go standard library and runtime go1.27.4 ほか（同一の原文を共有）
 License: BSD-3-Clause
 Go standard library and runtime go1.27.4
 Source: https://go.googlesource.com/go/+/refs/tags/go1.27.4/LICENSE
-golang.org/x/image v0.45.0
-Source: https://go.googlesource.com/image/+/3ebddc7c54bd879f8d84d11db82892726f5192fd/LICENSE
+golang.org/x/image v0.48.0
+Source: https://go.googlesource.com/image/+/884d13f747188b6b8581f58ddb403e7a98874f3c/LICENSE
 golang.org/x/net v0.58.0
 Source: https://go.googlesource.com/net/+/acc78e0d2b2c855c0c4fbdcfe5f42a9e3d0f9778/LICENSE
-golang.org/x/sync v0.22.0
-Source: https://go.googlesource.com/sync/+/1eb64d4bc0cde6da1bb8ebc7f178bb577508e5d0/LICENSE
+golang.org/x/sync v0.25.0
+Source: https://go.googlesource.com/sync/+/1f920df1e8fcf601d1aaf0f2ea500e1d2ccce105/LICENSE
 golang.org/x/sys v0.50.0
 Source: https://go.googlesource.com/sys/+/00227f1d192842e243cba7763c1f9a1fcb1c4344/LICENSE
 golang.org/x/term v0.48.0
 Source: https://go.googlesource.com/term/+/91b12352ff53e31b89c322da2261ab29e7af83f1/LICENSE
-golang.org/x/text v0.41.0
-Source: https://go.googlesource.com/text/+/acdba6655fd45cdb5ab73c9d6a8981333bd65a39/LICENSE
+golang.org/x/text v0.44.0
+Source: https://go.googlesource.com/text/+/6070ac32abcdd1670599eeb3ee4d513c8184a513/LICENSE
 
 Copyright 2009 The Go Authors.
 
@@ -125,12 +125,12 @@ SOFTWARE.
 
 
 ========================================================================
-github.com/charmbracelet/x/ansi v0.11.8 ほか（同一の原文を共有）
+github.com/charmbracelet/x/ansi v0.11.10 ほか（同一の原文を共有）
 ========================================================================
 
 License: MIT
-github.com/charmbracelet/x/ansi v0.11.8
-Source: https://github.com/charmbracelet/x/blob/00c6608f106b9c6cd8a1a77156f7901f41265e64/ansi/LICENSE
+github.com/charmbracelet/x/ansi v0.11.10
+Source: https://github.com/charmbracelet/x/blob/ee8f5034ce23802737c556faec48cfcf1abb7456/LICENSE
 github.com/charmbracelet/x/conpty v0.2.0
 Source: https://github.com/charmbracelet/x/blob/74ce264f24fc7e97da2a0a5beba634c65dcf4af1/conpty/LICENSE
 github.com/charmbracelet/x/term v0.2.2
@@ -261,12 +261,12 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 
 ========================================================================
-github.com/go-text/typesetting v0.3.4
+github.com/go-text/typesetting v0.3.5
 ========================================================================
 
 License: Unlicense OR BSD-3-Clause (BSD-3-Clauseを選択)
-github.com/go-text/typesetting v0.3.4
-Source: https://github.com/go-text/typesetting/blob/40da63380aab8c0f9f662f1f95a16a91d3393c2e/LICENSE
+github.com/go-text/typesetting v0.3.5
+Source: https://github.com/go-text/typesetting/blob/19482bd51f2338e34bacd8cfd3288a04bbadc598/LICENSE
 
 This project is provided under the terms of the UNLICENSE or
 the BSD license denoted by the following SPDX identifier:
@@ -541,11 +541,11 @@ SOFTWARE.
 
 
 ========================================================================
-github.com/go-text/typesetting v0.3.4 / harfbuzz/LICENSE
+github.com/go-text/typesetting v0.3.5 / harfbuzz/LICENSE
 ========================================================================
 
 License: MIT
-Source: https://github.com/go-text/typesetting/blob/40da63380aab8c0f9f662f1f95a16a91d3393c2e/harfbuzz/LICENSE
+Source: https://github.com/go-text/typesetting/blob/19482bd51f2338e34bacd8cfd3288a04bbadc598/harfbuzz/LICENSE
 
 MIT License
 
@@ -628,12 +628,12 @@ Go / Additional IP Rights Grant (Patents)
 
 Go go1.27.4 および上記golang.org/x/{image,net,sync,sys,term,text}に付随する追加の特許許諾です。
 Source: https://go.googlesource.com/go/+/refs/tags/go1.27.4/PATENTS
-Source: https://go.googlesource.com/image/+/3ebddc7c54bd879f8d84d11db82892726f5192fd/PATENTS
+Source: https://go.googlesource.com/image/+/884d13f747188b6b8581f58ddb403e7a98874f3c/PATENTS
 Source: https://go.googlesource.com/net/+/acc78e0d2b2c855c0c4fbdcfe5f42a9e3d0f9778/PATENTS
-Source: https://go.googlesource.com/sync/+/1eb64d4bc0cde6da1bb8ebc7f178bb577508e5d0/PATENTS
+Source: https://go.googlesource.com/sync/+/1f920df1e8fcf601d1aaf0f2ea500e1d2ccce105/PATENTS
 Source: https://go.googlesource.com/sys/+/00227f1d192842e243cba7763c1f9a1fcb1c4344/PATENTS
 Source: https://go.googlesource.com/term/+/91b12352ff53e31b89c322da2261ab29e7af83f1/PATENTS
-Source: https://go.googlesource.com/text/+/acdba6655fd45cdb5ab73c9d6a8981333bd65a39/PATENTS
+Source: https://go.googlesource.com/text/+/6070ac32abcdd1670599eeb3ee4d513c8184a513/PATENTS
 
 Additional IP Rights Grant (Patents)
 
