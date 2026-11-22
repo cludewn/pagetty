@@ -237,7 +237,7 @@ func encodePNG(w io.Writer, data []byte, width, height int) error {
 	}
 	img := image.NewRGBA(image.Rect(0, 0, width, height))
 	icon.SetTarget(0, 0, float64(width), float64(height))
-	scanner := rasterx.NewScannerGV(width, height, img, img.Bounds())
+	scanner := newPNGScanner(img)
 	icon.Draw(rasterx.NewDasher(width, height, scanner), 1)
 	return png.Encode(w, img)
 }
