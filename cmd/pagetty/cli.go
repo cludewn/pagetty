@@ -87,7 +87,6 @@ PageTTY自身へのパイプ・ファイル入力は非対応です。入力フ�
 	result, captureErr := capture.Run(ctx, args[separator+1:], capture.Options{
 		Columns: *columns, Rows: rows, Input: input, Output: output,
 	})
-	captureTime := time.Since(started)
 	// 対象の最終行に改行がなくても、案内を実行結果から分離する。
 	fmt.Fprintln(diagnostics)
 	if captureErr != nil {
@@ -115,37 +114,41 @@ PageTTY自身へのパイプ・ファイル入力は非対応です。入力フ�
 		return code
 	}
 	renderStart := time.Now()
-	update, stop := startRenderProgress(diagnostics, isTerminal(diagnostics), renderStart)
+	update, stop := startRenderProgress(diagnostics, renderTerminalWidth(diagnostics), renderStart)
 	images, err := render.Render(result.Document, render.Options{
 		Format: render.Format(*format), MaxLines: *maxLines, Progress: update,
 	})
-	renderTime := time.Since(renderStart)
 	stop()
 	if err != nil {
 		fmt.Fprintf(diagnostics, "pagetty: レンダリング失敗: %v\n", err)
 		return 1
 	}
 	fmt.Fprintf(diagnostics, "pagetty: Saving %d %s...\n", len(images), pageWord(len(images)))
-	saveStart := time.Now()
 	paths, err := saveImages(dir, started.Format("20060102-150405"), partial, images)
-	saveTime := time.Since(saveStart)
+	elapsed := time.Since(started)
 	for _, path := range paths {
-		fmt.Fprintf(diagnostics, "pagetty: Saved to %s\n", path)
+		fmt.Fprintf(diagnostics, "pagetty: Output: %s\n", path)
 	}
 	if err != nil {
 		fmt.Fprintf(diagnostics, "pagetty: 画像保存失敗（%d/%dページ保存）: %v\n", len(paths), len(images), err)
 		return 1
 	}
-	status := ""
+	label := "Saved"
 	if partial {
-		status = "partial capture; "
+		label = "Partial capture:"
 	} else if code != 0 {
-		status = "command failed; "
+		label = "Command failed; saved"
 	}
-	fmt.Fprintf(diagnostics, "pagetty: Saved %d %s %s (%stotal %s, capture %s, render %s, save %s)\n",
-		len(paths), strings.ToUpper(*format), pageWord(len(paths)), status, time.Since(started).Round(time.Millisecond),
-		captureTime.Round(time.Millisecond), renderTime.Round(time.Millisecond), saveTime.Round(time.Millisecond))
+	fmt.Fprintf(diagnostics, "pagetty: %s %d %s %s in %s\n",
+		label, len(paths), strings.ToUpper(*format), pageWord(len(paths)), completionDuration(elapsed))
 	return code
+}
+
+func completionDuration(elapsed time.Duration) time.Duration {
+	if elapsed < time.Second {
+		return elapsed.Round(time.Millisecond)
+	}
+	return elapsed.Round(10 * time.Millisecond)
 }
 
 func terminalRows(input *os.File, output io.Writer) int {

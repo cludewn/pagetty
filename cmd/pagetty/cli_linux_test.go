@@ -212,7 +212,7 @@ func TestCLIUnixProcessSignals(t *testing.T) {
 					t.Fatalf("child SIGPIPE changed: output=%q diagnostics=%q", output.String(), diagnostics.String())
 				}
 			case "closed stdout":
-				if !strings.Contains(diagnostics.String(), "PTY実行・記録失敗") || !strings.Contains(diagnostics.String(), "broken pipe") || !strings.Contains(diagnostics.String(), "Saved 2 PNG pages (partial capture;") {
+				if !strings.Contains(diagnostics.String(), "PTY実行・記録失敗") || !strings.Contains(diagnostics.String(), "broken pipe") || !strings.Contains(diagnostics.String(), "Partial capture: 2 PNG pages in ") {
 					t.Fatalf("write failure or save result not reported: %q", diagnostics.String())
 				}
 			case "Ctrl+C":

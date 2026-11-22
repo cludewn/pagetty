@@ -52,7 +52,10 @@ func TestCLIChild(t *testing.T) {
 		case "args":
 			data, _ := json.Marshal(os.Args[i+2:])
 			fmt.Print(string(data))
-		case "lines":
+		case "lines", "delayed-lines":
+			if os.Args[i+1] == "delayed-lines" {
+				time.Sleep(150 * time.Millisecond)
+			}
 			for i := range 5 {
 				fmt.Printf("line%d\n", i)
 			}
@@ -218,7 +221,7 @@ func TestCLIFormatsWidthAndPages(t *testing.T) {
 
 func TestCLIReportsPageProgressOnStderr(t *testing.T) {
 	dir := t.TempDir()
-	code, output, diagnostics := runTestCLI(t, cliArgs([]string{"--format", "svg", "--max-lines", "2", "--output-dir", dir}, "lines"))
+	code, output, diagnostics := runTestCLI(t, cliArgs([]string{"--format", "svg", "--max-lines", "2", "--output-dir", dir}, "delayed-lines"))
 	if code != 0 || !strings.HasPrefix(output, "line0") || strings.Contains(output, "pagetty:") {
 		t.Fatalf("code=%d output=%q diagnostics=%q", code, output, diagnostics)
 	}
@@ -227,12 +230,16 @@ func TestCLIReportsPageProgressOnStderr(t *testing.T) {
 	}
 	for _, step := range []string{"Running command...", "Rendering 0/3 pages", "Rendering 1/3 pages",
 		"Rendering 2/3 pages", "Rendering 3/3 pages", "Saving 3 pages...",
-		"Saved 3 SVG pages (total ", "capture ", "render ", "save "} {
+		"pagetty: Saved 3 SVG pages in "} {
 		_, rest, ok := strings.Cut(diagnostics, step)
 		if !ok {
 			t.Fatalf("missing or out-of-order %q: %q", step, diagnostics)
 		}
 		diagnostics = rest
+	}
+	elapsed, err := time.ParseDuration(strings.TrimSpace(diagnostics))
+	if err != nil || elapsed < 150*time.Millisecond {
+		t.Errorf("expected a single elapsed time including command execution, got %q", diagnostics)
 	}
 }
 
@@ -316,6 +323,12 @@ func TestCLINonzeroAndFailures(t *testing.T) {
 			if code != tc.code || !strings.Contains(diagnostics, tc.message) || len(imageFiles(t, dir, "png")) != tc.pages {
 				t.Fatalf("code=%d diagnostics=%q", code, diagnostics)
 			}
+			if strings.Contains(diagnostics, "pagetty: Saved ") {
+				t.Fatalf("normal completion reported with exit code %d: %q", code, diagnostics)
+			}
+			if tc.pages > 0 && !strings.Contains(diagnostics, "Command failed; saved 1 PNG page in ") {
+				t.Fatalf("saved failure record not reported: %q", diagnostics)
+			}
 			if tc.pages == 0 {
 				if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
 					t.Fatalf("render failure created output directory: %v", err)
@@ -329,7 +342,7 @@ func TestCLINonzeroAndFailures(t *testing.T) {
 		t.Fatal(err)
 	}
 	code, _, diagnostics := runTestCLI(t, cliArgs([]string{"--output-dir", blocker}, "nonzero"))
-	if code != 1 || !strings.Contains(diagnostics, "画像保存失敗（0/1ページ保存）") || !strings.Contains(diagnostics, "終了コード 7") || strings.Contains(diagnostics, "pagetty: Saved 1") {
+	if code != 1 || !strings.Contains(diagnostics, "画像保存失敗（0/1ページ保存）") || !strings.Contains(diagnostics, "終了コード 7") || strings.Contains(diagnostics, "pagetty: Saved ") {
 		t.Fatalf("code=%d diagnostics=%q", code, diagnostics)
 	}
 	data, err := os.ReadFile(blocker)
@@ -375,6 +388,9 @@ func TestCLIPartialRecords(t *testing.T) {
 			if code != wantCode || !strings.Contains(diagnostics.String(), "PTY実行・記録失敗") || !strings.Contains(diagnostics.String(), message) || len(paths) != 1 || !strings.Contains(paths[0], "-partial_001") {
 				t.Fatalf("code=%d paths=%v diagnostics=%q", code, paths, diagnostics.String())
 			}
+			if !strings.Contains(diagnostics.String(), "Partial capture: 1 PNG page in ") || strings.Contains(diagnostics.String(), "pagetty: Saved ") {
+				t.Fatalf("incorrect partial capture summary: %q", diagnostics.String())
+			}
 			readImage(t, paths[0])
 		})
 	}
@@ -389,7 +405,7 @@ func TestCLIInterruptedSaveFailure(t *testing.T) {
 	defer cancel()
 	var diagnostics bytes.Buffer
 	code := runCLI(ctx, cliArgs([]string{"--output-dir", path}, "block"), nil, cancelOutput{cancel}, &diagnostics)
-	if code != 1 || !strings.Contains(diagnostics.String(), "中断されました") || !strings.Contains(diagnostics.String(), "画像保存失敗") || strings.Contains(diagnostics.String(), "pagetty: Saved 1") {
+	if code != 1 || !strings.Contains(diagnostics.String(), "中断されました") || !strings.Contains(diagnostics.String(), "画像保存失敗") || strings.Contains(diagnostics.String(), "pagetty: Saved ") || strings.Contains(diagnostics.String(), "Partial capture:") {
 		t.Fatalf("code=%d diagnostics=%q", code, diagnostics.String())
 	}
 }

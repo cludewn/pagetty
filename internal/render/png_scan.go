@@ -58,7 +58,8 @@ func (s *pngScanner) Draw() {
 	}
 	w, h := s.canvas.Rect.Dx(), s.canvas.Rect.Dy()
 	top := max(0, s.extent.Min.Y.Floor())
-	bottom := min(h, s.extent.Max.Y.Ceil())
+	// 切り上げ時に上限付近の固定小数点がオーバーフローしないよう先に切る。
+	bottom := min(s.extent.Max.Y, fixed.I(h)).Ceil()
 	if top >= bottom {
 		return
 	}
