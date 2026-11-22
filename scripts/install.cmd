@@ -11,6 +11,7 @@ if defined PAGETTY_UNINSTALL (
         pause
         exit /b 1
     )
+    echo PageTTY uninstall started. Check the uninstall window for the result.
     exit /b 0
 )
 "%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command "%PAGETTY_COMMAND%"
@@ -42,16 +43,30 @@ function Assert-PlainFile($path) {
     }
 }
 
-function Read-Path($key) {
-    if ($key.GetValueNames() -notcontains 'Path') { return @{ Kind = 'Absent'; Raw = '' } }
-    $kind = [string]$key.GetValueKind('Path')
-    if ($kind -notin @('String','ExpandString')) { throw 'Unsupported user Path registry type.' }
-    @{ Kind = $kind; Raw = $key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) }
+function Read-Path($registry) {
+    $key = $registry.OpenSubKey('Environment', $false)
+    if ($null -eq $key) { return @{ Kind = 'Absent'; Raw = '' } }
+    try {
+        if ($key.GetValueNames() -notcontains 'Path') { return @{ Kind = 'Absent'; Raw = '' } }
+        $kind = [string]$key.GetValueKind('Path')
+        if ($kind -notin @('String','ExpandString')) { throw 'Unsupported user Path registry type.' }
+        @{ Kind = $kind; Raw = $key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) }
+    } finally { $key.Dispose() }
 }
 
-function Write-Path($key, $value) {
-    if ($value.Kind -eq 'Absent') { $key.DeleteValue('Path', $false) }
-    else { $key.SetValue('Path', $value.Raw, [Microsoft.Win32.RegistryValueKind]$value.Kind) }
+# 照合と書き込みは不可分ではないため、その間の別プロセスの変更は上書きされ得る。
+function Write-Path($registry, $value, [bool]$createKey = $false) {
+    $key = $registry.OpenSubKey('Environment', $true)
+    if ($null -eq $key) {
+        if ($value.Kind -eq 'Absent') { return }
+        if (!$createKey) { throw 'The user Environment registry key disappeared during setup.' }
+        $key = $registry.CreateSubKey('Environment')
+        if ($null -eq $key) { throw 'Could not create the user Environment registry key.' }
+    }
+    try {
+        if ($value.Kind -eq 'Absent') { $key.DeleteValue('Path', $false) }
+        else { $key.SetValue('Path', $value.Raw, [Microsoft.Win32.RegistryValueKind]$value.Kind) }
+    } finally { $key.Dispose() }
 }
 
 function Get-PathHash($value) {
@@ -71,7 +86,7 @@ function Get-PathPlan($before, [string]$effective, $dir, $ownership, [bool]$unin
             throw 'Inconsistent PATH ownership record.'
         }
         if ($ownership.Hash -ine (Get-PathHash $before)) {
-            $plan.Manual = $true
+            $plan.Manual = !$uninstall -or $before.Kind -cne 'Absent'
             return $plan
         }
         if ($before.Kind -eq 'Absent') { throw 'Inconsistent PATH ownership record.' }
@@ -185,7 +200,7 @@ function Clear-Payload($path) {
     [IO.Directory]::Delete($path)
 }
 
-function Invoke-PageTTYSetup($root, $source, $launcher, $key, $effective, [bool]$uninstall) {
+function Invoke-PageTTYSetup($root, $source, $launcher, $registry, $effective, [bool]$uninstall) {
     if (!$root -or $root -match '[;%]') { throw 'Unsupported LocalAppData location.' }
     # DirectoryInfo.Parent does not have the provider's PSIsContainer property.
     for ($item = Get-Item -LiteralPath $root -Force -ErrorAction Stop; $item; $item = $item.Parent) {
@@ -208,7 +223,7 @@ function Invoke-PageTTYSetup($root, $source, $launcher, $key, $effective, [bool]
     try {
         $state = Get-InstalledState $dir
         if (!$state -and $uninstall) { Write-Host 'PageTTY is not installed.'; return 0 }
-        $before = Read-Path $key
+        $before = Read-Path $registry
         if (!$uninstall -and $null -eq $effective) { $effective = Read-EffectivePath }
         $version = if ($state) { $state.Version } else { 2 }
         $plan = Get-PathPlan $before $effective $dir $state.Path $uninstall $version
@@ -230,7 +245,13 @@ function Invoke-PageTTYSetup($root, $source, $launcher, $key, $effective, [bool]
         }
         if ($state) {
             $null = Get-InstalledState $dir
-            Move-Payload $dir $backup
+            # 呼び出し元が作業ディレクトリを保持している場合、移動の時点で拒否される。
+            try { Move-Payload $dir $backup } catch {
+                if ($uninstall -and ($_.Exception.GetBaseException().HResult -band 0xffff) -eq 32) {
+                    throw "Windows is still using $dir. Leave this directory in open terminals, then run uninstall.cmd from another directory."
+                }
+                throw
+            }
             $movedOld = $true
         }
         if (!$uninstall) {
@@ -238,11 +259,11 @@ function Invoke-PageTTYSetup($root, $source, $launcher, $key, $effective, [bool]
             $placedNew = $true
         }
         if ($plan.Change) {
-            if ((Get-PathHash (Read-Path $key)) -cne (Get-PathHash $before)) {
+            if ((Get-PathHash (Read-Path $registry)) -cne (Get-PathHash $before)) {
                 throw 'User PATH changed during setup. Retry the operation.'
             }
             $attemptedPath = $true
-            Write-Path $key $plan.Value
+            Write-Path $registry $plan.Value (!$uninstall -and $before.Kind -ceq 'Absent')
         }
         $committed = $true
     } catch {
@@ -250,8 +271,8 @@ function Invoke-PageTTYSetup($root, $source, $launcher, $key, $effective, [bool]
         $restoreErrors = @()
         if ($attemptedPath) {
             try {
-                $current = Get-PathHash (Read-Path $key)
-                if ($current -ceq (Get-PathHash $plan.Value)) { Write-Path $key $before }
+                $current = Get-PathHash (Read-Path $registry)
+                if ($current -ceq (Get-PathHash $plan.Value)) { Write-Path $registry $before }
                 elseif ($current -cne (Get-PathHash $before)) { throw 'PATH changed again and was left untouched.' }
             } catch { $restoreErrors += "PATH: $($_.Exception.Message)" }
         }
@@ -333,10 +354,6 @@ function Send-PathNotification([bool]$uninstall) {
 $root = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
 $uninstall = $env:PAGETTY_UNINSTALL -eq '1'
 if (!$uninstall) { Initialize-Native }
-$key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
-if (!$key) { throw 'Cannot open the user Environment registry key for writing.' }
-try {
-    $status = Invoke-PageTTYSetup $root ([IO.Path]::GetDirectoryName($env:PAGETTY_SETUP)) $env:PAGETTY_SETUP $key $null $uninstall
-} finally { $key.Dispose() }
+$status = Invoke-PageTTYSetup $root ([IO.Path]::GetDirectoryName($env:PAGETTY_SETUP)) $env:PAGETTY_SETUP ([Microsoft.Win32.Registry]::CurrentUser) $null $uninstall
 Write-Host 'Close and reopen your terminal. If PATH is stale, sign out and back in.'
 return $status

@@ -40,6 +40,12 @@ class InstallTest(unittest.TestCase):
                 config:*'/apply/.profile '*:*) exit 23 ;;
                 rollback:*'/apply/.profile '*:*|rollback:*'/before/.bashrc '*:*) exit 23 ;;
                 place:*'/new '*:*) exit 23 ;;
+              esac
+              case "$SIGNAL_STEP:$*" in
+                old:*'/old'|placed:*'/new '*|config:*'/apply/.profile '*)
+                    /usr/bin/mv "$@" || exit $?
+                    kill -s "$SETUP_SIGNAL" -- "-$SETUP_PID"
+                    exit 0 ;;
               esac""".replace("@@{", chr(36) + "{"),
         }
         for tool, script in wrappers.items():
@@ -51,11 +57,12 @@ class InstallTest(unittest.TestCase):
         for name in ("pagetty", "LICENSE", "THIRD_PARTY_NOTICES.txt"):
             (self.source / name).write_text(f"{name} {version}\n")
 
-    def run_setup(self, uninstall=False, step="", ok=True):
+    def run_setup(self, uninstall=False, step="", ok=True, signal="", signal_step=""):
         script = self.dest / "uninstall.sh" if uninstall else self.source / "install.sh"
         result = subprocess.run(
-            ["bash", str(script)], cwd=self.home, env=dict(self.env, FAIL_STEP=step),
-            capture_output=True, text=True,
+            ["bash", "-c", 'export SETUP_PID=$$; exec bash "$1"', "bash", str(script)],
+            cwd=self.home, env=dict(self.env, FAIL_STEP=step, SETUP_SIGNAL=signal, SIGNAL_STEP=signal_step),
+            capture_output=True, text=True, start_new_session=True,
         )
         self.assertEqual(result.returncode == 0, ok, (result.stdout, result.stderr))
         return result
@@ -147,6 +154,39 @@ class InstallTest(unittest.TestCase):
                     self.assertEqual(self.dest.exists(), update)
                     self.assertFalse(self.work.exists())
                     self.assertEqual(self.snapshot(), before)
+
+    def check_signals_after_mutation(self, already_installed, steps, uninstall=False):
+        before = self.snapshot()
+        for signal in ("INT", "TERM"):
+            for step in steps:
+                with self.subTest(signal=signal, step=step):
+                    result = self.run_setup(uninstall=uninstall, ok=False, signal=signal, signal_step=step)
+                    self.assertEqual(result.returncode, 1, result.stderr)
+                    self.assertFalse(self.work.exists())
+                    self.assertEqual(self.snapshot(), before)
+                    self.assertEqual(self.dest.exists(), already_installed)
+                    self.assertEqual((self.home / ".local").exists(), already_installed)
+
+    def test_signals_during_fresh_install(self):
+        self.check_signals_after_mutation(False, ("placed", "config"))
+
+    def test_signals_during_update(self):
+        self.run_setup()
+        self.version("second")
+        self.rc.write_text('export PATH="/keep/first:$PATH:/keep/last"\n')
+        self.profile.write_text('. "$HOME/.bashrc"\n')
+        self.check_signals_after_mutation(True, ("old", "placed", "config"))
+
+    def test_signals_during_uninstall(self):
+        self.run_setup()
+        self.check_signals_after_mutation(True, ("old", "config"), uninstall=True)
+
+    def test_preserves_work_directory_that_setup_did_not_create(self):
+        self.work.mkdir()
+        (self.work / "recovery").write_text("previous setup files")
+        before = self.snapshot()
+        self.run_setup(ok=False)
+        self.assertEqual(self.snapshot(), before)
 
     def test_uninstall_failure_restores_old_payload_and_config(self):
         self.run_setup()

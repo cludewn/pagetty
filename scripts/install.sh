@@ -20,7 +20,8 @@ payload=(pagetty LICENSE THIRD_PARTY_NOTICES.txt uninstall.sh)
 hook='case ":${PATH-}:" in *":$HOME/.local/share/pagetty:"*|*":$HOME/.local/share/pagetty/:"*) ;; *) export PATH="${PATH:+$PATH:}$HOME/.local/share/pagetty" ;; esac # PageTTY installer'
 configs=(.bashrc .bash_profile .bash_login .profile)
 owned=() planned=() applied=() created_dirs=()
-moved_old=0 placed_new=0 committed=0
+owns_work=0 moved_old=0 placed_new=0 committed=0
+changing=0 interrupted=0
 
 hashes() { (cd -- "$1" && sha256sum -- "${payload[@]}"); }
 check_dir() { [[ -d $1 && ! -L $1 && -O $1 ]]; }
@@ -31,7 +32,15 @@ check_config() {
     fi
 }
 
-mkdir -m 700 -- "$work" || fail "Another setup is active or recovery is needed: $work"
+# ファイル操作を終えて復元用の記録を残すまで、割込みによる終了を保留する。
+mutate() ( trap '' INT TERM; "$@" )
+interrupt() {
+    if (( changing )); then interrupted=1; else exit 1; fi
+}
+finish_change() {
+    changing=0
+    if (( interrupted )); then exit 1; fi
+}
 
 clean_work() {
     local name path
@@ -62,6 +71,7 @@ finish() {
     trap - EXIT
     trap '' INT TERM
     set +e
+    (( owns_work )) || exit "$status"
     if (( status && ! committed )); then
         for name in "${applied[@]}"; do
             rc="$HOME/$name"
@@ -105,7 +115,11 @@ finish() {
     exit "$status"
 }
 trap finish EXIT
-trap 'exit 1' INT TERM
+trap interrupt INT TERM
+changing=1
+mutate mkdir -m 700 -- "$work" || fail "Another setup is active or recovery is needed: $work"
+owns_work=1
+finish_change
 for path in "$HOME/.local" "$parent"; do
     if exists "$path"; then
         check_dir "$path" && [[ $(stat -c %d -- "$path") == "$(stat -c %d -- "$HOME")" ]] ||
@@ -188,7 +202,12 @@ if [[ $mode == install ]]; then
     } > "$work/manifest"
     mv -T -- "$work/manifest" "$work/new/$record"
     for path in "$HOME/.local" "$parent"; do
-        if ! exists "$path"; then mkdir -- "$path"; created_dirs=("$path" "${created_dirs[@]}"); fi
+        if ! exists "$path"; then
+            changing=1
+            mutate mkdir -- "$path"
+            created_dirs=("$path" "${created_dirs[@]}")
+            finish_change
+        fi
     done
 fi
 
@@ -198,23 +217,29 @@ if exists "$dir"; then
     [[ $(find "$dir" -mindepth 1 -maxdepth 1 -printf .) == ..... &&
         $(cat -- "$dir/$record") == "$(printf '%s\n' "${state[@]}")" &&
         $(hashes "$dir") == "$(printf '%s\n' "${state[@]:1:4}")" ]] || fail "Managed files have changed: $dir"
-    move_new "$dir" "$work/old" || fail "Could not move $dir. Close PageTTY and try again."
+    changing=1
+    mutate move_new "$dir" "$work/old" || fail "Could not move $dir. Close PageTTY and try again."
     moved_old=1
+    finish_change
 fi
 if [[ $mode == install ]]; then
-    move_new "$work/new" "$dir" || fail "Could not place $dir"
+    changing=1
+    mutate move_new "$work/new" "$dir" || fail "Could not place $dir"
     placed_new=1
+    finish_change
 fi
 for name in "${changes[@]}"; do
     rc="$HOME/$name"
     check_config "$rc"
+    changing=1
     if exists "$work/before/$name"; then
         cmp -s -- "$rc" "$work/before/$name" || fail "Startup file changed during setup: $rc"
-        mv -fT -- "$work/apply/$name" "$rc"
+        mutate mv -fT -- "$work/apply/$name" "$rc"
     else
-        move_new "$work/apply/$name" "$rc" || fail "Startup file appeared during setup: $rc"
+        mutate move_new "$work/apply/$name" "$rc" || fail "Startup file appeared during setup: $rc"
     fi
     applied+=("$name")
+    finish_change
 done
 
 committed=1

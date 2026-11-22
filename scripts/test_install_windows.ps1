@@ -31,8 +31,23 @@ $work = Join-Path $root 'PageTTY.setup'
 $launcher = Join-Path $source 'install.cmd'
 $installed = Join-Path $dir 'uninstall.cmd'
 
-function New-FakeKey($kind, $raw) {
-    $obj = [pscustomobject]@{ Kind = $kind; Raw = $raw; Writes = 0; Fail = '' }
+function New-FakeKey($kind, $raw, [bool]$present = $true) {
+    $obj = [pscustomobject]@{ Kind = $kind; Raw = $raw; Writes = 0; Fail = ''; Present = $present; Creates = 0; Denied = '' }
+    $obj | Add-Member ScriptMethod OpenSubKey {
+        param($name, $writable)
+        if ($name -cne 'Environment') { throw 'Unexpected registry key opened' }
+        if ($this.Denied -eq 'read' -or ($writable -and $this.Denied -eq 'write')) {
+            throw [UnauthorizedAccessException]::new('Injected registry access denial')
+        }
+        if ($this.Present) { return $this }
+    }
+    $obj | Add-Member ScriptMethod CreateSubKey {
+        param($name)
+        if ($name -cne 'Environment' -or $this.Present) { throw 'Unexpected registry key creation' }
+        $this.Present = $true; $this.Creates++
+        $this
+    }
+    $obj | Add-Member ScriptMethod Dispose {}
     $obj | Add-Member ScriptMethod GetValueNames { if ($this.Kind -ne 'Absent') { 'Path' } }
     $obj | Add-Member ScriptMethod GetValueKind { $this.Kind }
     $obj | Add-Member ScriptMethod GetValue {
@@ -337,11 +352,73 @@ try {
     $null = Uninstall $key
     Expect-Unchanged $key $before $null
     Assert (!$key.Writes) 'A preexisting PATH entry became owned'
-    $key = New-FakeKey Absent ''
+    foreach ($present in @($true, $false)) {
+        # A missing key may be created on write; an existing key is reused.
+        $key = New-FakeKey Absent '' $present
+        $before = Get-PathHash (Read-Path $key)
+        $null = Install $key 'C:\Machine'
+        $creates = if ($present) { 0 } else { 1 }
+        Assert ($key.Present -and $key.Creates -eq $creates -and $key.Kind -ceq 'String' -and $key.Raw -ceq $dir) 'Missing PATH was not installed as REG_SZ'
+        $null = Uninstall $key
+        Expect-Unchanged $key $before $null
+        Assert ($key.Present -and $key.Creates -eq $creates -and $key.Writes -eq 2) 'Uninstall should remove only the Path value'
+
+        $key = New-FakeKey String 'C:\Keep'
+        $null = Install $key 'C:\Machine;C:\Keep'
+        # An external edit removed the Path value or its entire key.
+        $key.Kind = 'Absent'; $key.Raw = ''; $key.Present = $present
+        $before = Get-PathHash (Read-Path $key)
+        $validRecord = [IO.File]::ReadAllText($recordPath)
+        $entry = ConvertFrom-Json $validRecord
+        $entry.Path.Kind = 'Absent'
+        Save-Record $recordPath $entry
+        $snapshot = Snapshot
+        Assert-Fails { Uninstall $key } 'Inconsistent PATH ownership record'
+        Expect-Unchanged $key $before $snapshot
+        [IO.File]::WriteAllText($recordPath, $validRecord)
+        $null = Uninstall $key
+        Expect-Unchanged $key $before $null
+        Assert ($key.Present -eq $present -and $key.Creates -eq 0 -and $key.Writes -eq 1) 'Uninstall recreated a removed key or Path value'
+    }
+
+    $key = New-FakeKey Absent '' $false
     $before = Get-PathHash (Read-Path $key)
-    $null = Install $key 'C:\Machine'
+    $null = Install $key "C:\Machine;$dir"
     $null = Uninstall $key
     Expect-Unchanged $key $before $null
+    Assert (!$key.Present -and !$key.Creates -and !$key.Writes) 'Setup created Environment without needing to write PATH'
+
+    foreach ($deny in @('read','write')) {
+        $key = New-FakeKey Absent '' $false
+        $key.Denied = $deny
+        Assert-Fails { Install $key 'C:\Machine' } 'Injected registry access denial'
+        $key.Denied = ''
+        Expect-Unchanged $key $before $null
+        Assert (!$key.Present -and !$key.Creates -and !$key.Writes) 'Access denied was treated as a missing key'
+    }
+
+    $key = New-FakeKey String 'C:\Keep'
+    $null = Install $key 'C:\Keep'
+    $snapshot = Snapshot
+    $before = Get-PathHash (Read-Path $key)
+    $writes = $key.Writes
+    $holdInfo = [Diagnostics.ProcessStartInfo]::new($env:ComSpec, '/d')
+    $holdInfo.WorkingDirectory = $dir
+    $holdInfo.UseShellExecute = $false
+    $holdInfo.CreateNoWindow = $true
+    $holdInfo.RedirectStandardInput = $true
+    $holdInfo.RedirectStandardOutput = $true
+    $holder = [Diagnostics.Process]::Start($holdInfo)
+    try {
+        Assert-Fails { Uninstall $key } 'Leave this directory in open terminals'
+        Expect-Unchanged $key $before $snapshot
+        Assert ($key.Writes -eq $writes) 'Uninstall updated PATH while the caller held the install directory'
+    } finally {
+        $holder.StandardInput.WriteLine('exit')
+        if (!$holder.WaitForExit(10000)) { $holder.Kill(); $holder.WaitForExit() }
+        $holder.Dispose()
+    }
+    $null = Uninstall $key
 
     $key = New-FakeKey String 'C:\Keep'
     $before = Get-PathHash (Read-Path $key)
@@ -363,6 +440,7 @@ try {
     $body = @'
 $ErrorActionPreference = 'Stop'
 if ($env:PAGETTY_UNINSTALL -ne '1') { throw 'Wrong worker mode.' }
+if ([Environment]::CurrentDirectory -ine $env:SystemRoot) { throw "Wrong worker startup directory: $([Environment]::CurrentDirectory)" }
 $folder = [IO.Path]::GetDirectoryName($env:PAGETTY_SETUP)
 [IO.Directory]::Move($folder, [IO.Path]::Combine([IO.Path]::GetDirectoryName($folder), 'launched'))
 Write-Host 'LAUNCHER WORKER OK'
@@ -378,17 +456,24 @@ return 0
     $info.RedirectStandardOutput = $true
     $info.RedirectStandardError = $true
     $info.CreateNoWindow = $true
-    $proc = [Diagnostics.Process]::Start($info)
-    try {
-        $stdout = $proc.StandardOutput.ReadToEndAsync()
-        $stderr = $proc.StandardError.ReadToEndAsync()
-        $proc.StandardInput.WriteLine('')
-        $proc.StandardInput.Close()
-        if (!$proc.WaitForExit(15000)) { $proc.Kill(); throw 'Batch fixture timed out.' }
-        if (!$stdout.Wait(15000) -or !$stderr.Wait(15000)) { throw 'Batch worker timed out.' }
-        $output = $stdout.Result + $stderr.Result
-        Assert ($proc.ExitCode -eq 0 -and $output -match 'LAUNCHER WORKER OK' -and [IO.Directory]::Exists($moved)) $output
-    } finally { $proc.Dispose() }
+    foreach ($cwd in @($base, $fixture)) {
+        # A one-shot launcher may start in the directory that it will then release.
+        $info.WorkingDirectory = $cwd
+        $proc = [Diagnostics.Process]::Start($info)
+        try {
+            $stdout = $proc.StandardOutput.ReadToEndAsync()
+            $stderr = $proc.StandardError.ReadToEndAsync()
+            $proc.StandardInput.WriteLine('')
+            $proc.StandardInput.Close()
+            if (!$proc.WaitForExit(15000)) { $proc.Kill(); throw 'Batch fixture timed out.' }
+            if (!$stdout.Wait(15000) -or !$stderr.Wait(15000)) { throw 'Batch worker timed out.' }
+            $output = $stdout.Result + $stderr.Result
+            Assert ($proc.ExitCode -eq 0 -and $output -match 'Check the uninstall window for the result' -and
+                $output -match 'LAUNCHER WORKER OK' -and [IO.Directory]::Exists($moved)) $output
+        } finally { $proc.Dispose() }
+        [IO.Directory]::Move($moved, $fixture)
+    }
+    $info.WorkingDirectory = $base
     # Exercise the synchronous launcher's exit status without running the installer payload.
     $fake = Join-Path $base 'install.cmd'
     $body = [char]10 + "Write-Warning 'Install applied. Cleanup failed.'; return 2"
