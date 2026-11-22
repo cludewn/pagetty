@@ -55,21 +55,27 @@ func startRenderProgress(w io.Writer, width func() int, started time.Time) (upda
 	var mu sync.Mutex
 	var done, total int
 	var last string
+	var lastWidth int
 	paint := func(line string, columns int) {
+		// 縮小や幅不明でリフローした可能性がある行は、改行して閉じる。
+		if width != nil && last != "" && columns < lastWidth {
+			fmt.Fprint(w, "\r\n")
+			last = ""
+		}
 		if line == last {
 			return
 		}
 		if width == nil {
 			fmt.Fprintln(w, line)
 		} else {
-			padding := max(0, min(len(last), columns-1)-len(line))
+			padding := max(0, len(last)-len(line))
 			end := ""
 			if line == "" {
 				end = "\r"
 			}
 			fmt.Fprintf(w, "\r%s%s%s", line, strings.Repeat(" ", padding), end)
 		}
-		last = line
+		last, lastWidth = line, columns
 	}
 	draw := func() {
 		columns := -1
