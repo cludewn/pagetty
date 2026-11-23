@@ -29,6 +29,24 @@ bash install.sh
 
 Bash以外のシェルや、Bashの起動設定を独自に管理している環境では、展開先の`./pagetty`を直接実行できます。
 
+### セキュリティソフトの警告について
+
+PageTTYのダウンロード時や実行時に、セキュリティソフトなどの警告が表示される場合があります。
+
+<details>
+
+<summary>警告が表示される理由と対処方法</summary>
+
+PageTTYのWindows実行ファイルにはコード署名がありません。未署名であることや利用実績の少なさなどが、警告の一因となる場合があります。Linuxでも、ブラウザやセキュリティソフトの設定によっては警告が発生する可能性があります。
+
+警告は必ずしもマルウェアの検出を意味しません。ただし、未署名であることだけを理由に、警告を無視してよいと判断することはできません。
+
+警告が表示された場合は、公式GitHub Releasesからダウンロードしたファイルであることと、警告の内容を確認してください。
+
+ダウンロードしたファイルが正式な配布物と一致するか確認したい場合は、後述の[検証方法](#ダウンロードの検証任意)で任意に検証できます。ただし、この検証はソフトウェア自体の安全性を保証するものではありません。
+
+</details>
+
 ## 使い方
 
 いつもの実行コマンドの前に`pagetty --`を付けます。
@@ -106,16 +124,57 @@ pagetty -- cmd.exe /d /c ".\a.exe < input.txt"
 - 同梱フォントにない文字や絵文字は`□`になります。
 - 非表示の入力は画像に入りません。画面に出力された機密情報は共有前に確認してください。
 
-## ダウンロードの照合（任意）
+## ダウンロードの検証（任意）
 
-Releasesの`SHA256SUMS`とアーカイブを同じフォルダーに置きます。
+ダウンロードしたファイルが正式な配布物と一致するか確認したい場合は、以下の方法で検証できます。通常の利用に必須の手順ではありません。また、検証に成功してもソフトウェア自体の安全性が保証されるわけではありません。
 
-- Windows：PowerShellで`Get-FileHash .\pagetty-windows-amd64.zip -Algorithm SHA256`を実行し、`SHA256SUMS`のWindows版の値と照合します。
-- Linux / WSL：以下のコマンドでLinux版の行を抽出して照合します。対象行がない場合、抽出した行の形式が不正な場合、ハッシュが一致しない場合は失敗します。
+以下のコマンドは、ダウンロードしたアーカイブがあるフォルダーで実行してください。
+
+<details>
+
+<summary>GitHub CLIがある場合</summary>
+
+GitHubの署名付きRelease Attestationを使って検証します。対象はRelease Attestationが付いた変更不可（Immutable）のリリースです。
+
+**Windows（PowerShell）**
+
+~~~powershell
+gh release verify-asset v0.1.0 .\pagetty-windows-amd64.zip -R cludewn/pagetty
+~~~
+
+**Linux / WSL**
+
+~~~sh
+gh release verify-asset v0.1.0 ./pagetty-linux-amd64.tar.gz -R cludewn/pagetty
+~~~
+
+`verify-asset`に対応したGitHub CLIと認証が必要です。`v0.1.0`は例です。実際にダウンロードしたリリースのタグを指定してください。
+
+</details>
+
+<details>
+
+<summary>GitHub CLIがない場合</summary>
+
+GitHub Releasesからアーカイブと`SHA256SUMS`をダウンロードし、同じフォルダーに置きます。
+
+**Windows**
+
+PowerShellで次のコマンドを実行し、表示されたSHA-256を`SHA256SUMS`のWindows版の値と比較します。
+
+~~~powershell
+Get-FileHash .\pagetty-windows-amd64.zip -Algorithm SHA256
+~~~
+
+**Linux / WSL**
+
+次のコマンドでLinux版のSHA-256を照合します。
 
 ~~~sh
 grep -E '^[^[:space:]]*  pagetty-linux-amd64\.tar\.gz$' SHA256SUMS | sha256sum --strict -c -
 ~~~
+
+</details>
 
 ## ライセンス
 
