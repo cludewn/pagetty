@@ -4,7 +4,7 @@ PageTTYは、ターミナルで実行したプログラムの表示をPNGやSVG�
 
 ## インストール
 
-[GitHub Releases](https://github.com/cludewn/pagetty/releases)から、使う環境に合ったファイルをダウンロードしてください。Goやフォントの追加インストールは不要です。
+**[GitHub Releases](https://github.com/cludewn/pagetty/releases/latest) から、使う環境に合ったファイルをダウンロードしてください**。Goやフォントの追加インストールは不要です。
 
 ### Windows（x86-64）
 
@@ -150,16 +150,16 @@ GitHubの署名付きRelease Attestationを使って検証します。対象はR
 **Windows（PowerShell）**
 
 ~~~powershell
-gh release verify-asset v0.1.0 .\pagetty-windows-amd64.zip -R cludewn/pagetty
+gh release verify-asset .\pagetty-windows-amd64.zip -R cludewn/pagetty
 ~~~
 
 **Linux / WSL**
 
 ~~~sh
-gh release verify-asset v0.1.0 ./pagetty-linux-amd64.tar.gz -R cludewn/pagetty
+gh release verify-asset ./pagetty-linux-amd64.tar.gz -R cludewn/pagetty
 ~~~
 
-`verify-asset`に対応したGitHub CLIと認証が必要です。`v0.1.0`は例です。実際にダウンロードしたリリースのタグを指定してください。
+`verify-asset`に対応したGitHub CLIと認証が必要です。タグを省略すると最新リリースを対象に検証します。過去のリリースを検証する場合は、ファイル名の前に対象のリリースタグを指定してください。
 
 </details>
 
@@ -167,7 +167,7 @@ gh release verify-asset v0.1.0 ./pagetty-linux-amd64.tar.gz -R cludewn/pagetty
 
 <summary>GitHub CLIがない場合</summary>
 
-GitHub Releasesからアーカイブと`SHA256SUMS`をダウンロードし、同じフォルダーに置きます。
+GitHub Releasesの同じリリースからアーカイブと`SHA256SUMS`をダウンロードし、同じフォルダーに置きます。
 
 **Windows**
 
