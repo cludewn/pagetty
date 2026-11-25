@@ -3,6 +3,7 @@ package capture
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -164,7 +165,7 @@ func TestWindowsConsoleInputAndRestore(t *testing.T) {
 					t.Fatalf("interactive result: %q", text)
 				}
 			case "ctrlc":
-				if !strings.Contains(text, ":true:restored=true:error=false") || !strings.Contains(text, "RECORD:ready") {
+				if !strings.Contains(text, ":true:restored=true:error=false") || strings.Contains(text, "RECORD:ready") {
 					t.Fatalf("Ctrl+C result: %q", text)
 				}
 			case "nonzero":
@@ -176,9 +177,53 @@ func TestWindowsConsoleInputAndRestore(t *testing.T) {
 					t.Fatalf("start failure result: %q", text)
 				}
 			case "stalled output":
-				if !strings.Contains(text, ":true:restored=true:error=true") || !strings.Contains(text, "RECORD:ready") {
+				if !strings.Contains(text, ":true:restored=true:error=true") || strings.Contains(text, "RECORD:ready") {
 					t.Fatalf("stalled output result: %q", text)
 				}
+			}
+		})
+	}
+}
+
+func TestWindowsPipeStopUnblocksIO(t *testing.T) {
+	for _, writing := range []bool{false, true} {
+		t.Run(fmt.Sprint(writing), func(t *testing.T) {
+			server, client, err := consolePipe(writing)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer windows.CloseHandle(client)
+			p := &overlappedPipe{handle: server}
+			defer p.Close()
+			done := make(chan error, 1)
+			started := make(chan struct{})
+			go func() {
+				close(started)
+				if writing {
+					_, err := p.Write(make([]byte, 256*1024))
+					done <- err
+				} else {
+					_, err := p.Read(make([]byte, 64))
+					done <- err
+				}
+			}()
+			<-started
+			select {
+			case err := <-done:
+				t.Fatalf("I/O did not block: %v", err)
+			case <-time.After(20 * time.Millisecond):
+			}
+			if err := p.stop(); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case err := <-done:
+				if !errors.Is(err, os.ErrClosed) {
+					t.Fatalf("stop has error %v", err)
+				}
+			case <-time.After(time.Second):
+				_ = windows.DisconnectNamedPipe(server)
+				t.Fatal("I/O did not stop")
 			}
 		})
 	}

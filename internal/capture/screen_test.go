@@ -82,6 +82,7 @@ func TestScreenScrollback(t *testing.T) {
 	s := newScreen(12, 3)
 	defer s.terminal.Close()
 	const count = 10050
+	s.terminal.SetScrollbackMaxLines(count)
 	for i := range count {
 		if _, err := fmt.Fprintf(s, "%05d\r\n", i); err != nil {
 			t.Fatal(err)

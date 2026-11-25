@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -50,8 +49,12 @@ func TestCaptureChild(t *testing.T) {
 			time.Sleep(time.Hour)
 		case "flood":
 			fmt.Print("ready" + strings.Repeat("z", 200000))
-		case "tail":
-			fmt.Print(strings.Repeat("x", 200000) + "END")
+		case "tail", "tail-limit":
+			count := 120000
+			if os.Args[i+1] == "tail-limit" {
+				count = 200000
+			}
+			fmt.Print(strings.Repeat("x", count) + "END")
 		case "terminal":
 			fmt.Printf("tty:%t:%t:%t", term.IsTerminal(int(os.Stdin.Fd())), term.IsTerminal(int(os.Stdout.Fd())), term.IsTerminal(int(os.Stderr.Fd())))
 			fmt.Fprint(os.Stderr, ":stderr")
@@ -131,7 +134,7 @@ func TestRunStartFailure(t *testing.T) {
 }
 
 func TestRunLongOutputAndTail(t *testing.T) {
-	for _, mode := range []string{"lines", "tail"} {
+	for _, mode := range []string{"lines", "tail", "tail-limit"} {
 		t.Run(mode, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
@@ -143,8 +146,8 @@ func TestRunLongOutputAndTail(t *testing.T) {
 			checkDocument(t, result.Document)
 			rows := rowTexts(result.Document)
 			if mode == "lines" {
-				if len(rows) != 10050 {
-					t.Fatalf("rows=%d", len(rows))
+				if len(rows) != maxRecordCells/80 || result.Limit == "" || !strings.Contains(out.String(), "10049") {
+					t.Fatalf("rows=%d limit=%q live tail=%t", len(rows), result.Limit, strings.Contains(out.String(), "10049"))
 				}
 				for i, row := range rows {
 					if row != fmt.Sprintf("%05d", i) {
@@ -152,7 +155,15 @@ func TestRunLongOutputAndTail(t *testing.T) {
 					}
 				}
 			} else {
-				want := strings.Repeat("x", 200000) + "END"
+				want := strings.Repeat("x", 120000) + "END"
+				if mode == "tail-limit" {
+					want = strings.Repeat("x", maxRecordCells/80*80)
+					if result.Limit == "" {
+						t.Fatal("record limit was not reported")
+					}
+				} else if result.Limit != "" {
+					t.Fatal("tail was unexpectedly limited")
+				}
 				if got := strings.Join(rows, ""); got != want {
 					t.Fatalf("captured tail lost: length=%d, want %d", len(got), len(want))
 				}
@@ -202,7 +213,7 @@ func (o *observedOutput) wait(t *testing.T, ctx context.Context, text string) {
 	}
 }
 
-func TestRunCancelKeepsOutput(t *testing.T) {
+func TestRunCancelDiscardsOutput(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	out := newObservedOutput()
@@ -219,7 +230,7 @@ func TestRunCancelKeepsOutput(t *testing.T) {
 	cancel()
 	got := <-done
 	if !errors.Is(got.err, context.Canceled) || !got.result.Started || !got.result.Interrupted ||
-		!reflect.DeepEqual(rowTexts(got.result.Document), []string{"ready"}) {
+		len(got.result.Document.Rows) != 0 {
 		t.Fatalf("result=%+v err=%v", got.result, got.err)
 	}
 }
@@ -319,8 +330,8 @@ func TestRunStalledOutput(t *testing.T) {
 			}
 			select {
 			case got := <-done:
-				if got.err == nil || !got.result.Started || writer.closed.Load() ||
-					!strings.Contains(strings.Join(rowTexts(got.result.Document), ""), marker) {
+				hasRecord := strings.Contains(strings.Join(rowTexts(got.result.Document), ""), marker)
+				if got.err == nil || !got.result.Started || writer.closed.Load() || hasRecord == (mode == "cancel") {
 					t.Fatalf("started=%t closed=%t display=%q err=%v", got.result.Started, writer.closed.Load(), rowTexts(got.result.Document), got.err)
 				}
 				if mode == "cancel" && (!errors.Is(got.err, context.Canceled) || !got.result.Interrupted) {

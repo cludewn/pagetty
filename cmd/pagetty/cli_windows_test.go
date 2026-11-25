@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"syscall"
@@ -36,7 +37,11 @@ func TestCLIWindowsConsoleChild(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	code := runCLI(ctx, cliArgs([]string{"--output-dir", dir}, mode), os.Stdin, os.Stdout, os.Stderr)
+	options := []string{"--output-dir", dir}
+	if strings.HasPrefix(mode, "limit-") {
+		options = append(options, "--max-lines", "1", "--page-limit", "2", "--format", "svg")
+	}
+	code := runCLI(ctx, cliArgs(options, mode), os.Stdin, os.Stdout, os.Stderr)
 	if err := ctx.Err(); err != nil {
 		fmt.Fprintf(os.Stderr, "CLI_CONTEXT_ERROR:%v\n", err)
 		os.Exit(11)
@@ -47,7 +52,11 @@ func TestCLIWindowsConsoleChild(t *testing.T) {
 }
 
 func TestCLIWindowsInteractionAndCtrlC(t *testing.T) {
-	for _, mode := range []string{"interactive", "ctrlc", "size", "deadline"} {
+	modes := []string{"interactive", "ctrlc", "size", "catch-exit", "catch-twice", "ignore-repeat", "limit-input", "limit-interrupt", "deadline"}
+	for _, tc := range pagePromptCases {
+		modes = append(modes, tc.mode)
+	}
+	for _, mode := range modes {
 		t.Run(mode, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 			defer cancel()
@@ -69,6 +78,17 @@ func TestCLIWindowsInteractionAndCtrlC(t *testing.T) {
 				t.Fatal(err)
 			}
 			args := []string{exe, "-test.run=^TestCLIWindowsConsoleChild$", "--", "pagetty-cli-console", mode, dir}
+			var promptCase *pagePromptCase
+			for _, tc := range pagePromptCases {
+				if mode == tc.mode {
+					promptCase = &tc
+					if err := os.WriteFile(filepath.Join(dir, "existing.png"), []byte("keep"), 0600); err != nil {
+						t.Fatal(err)
+					}
+					args = []string{exe, "-test.run=^TestCLIPagePromptProcess$", "--", "pagetty-page-prompt", mode, dir}
+					break
+				}
+			}
 			pid, childHandle, err := p.Spawn(exe, args, &syscall.ProcAttr{Env: os.Environ()})
 			if err != nil {
 				t.Fatal(err)
@@ -81,11 +101,29 @@ func TestCLIWindowsInteractionAndCtrlC(t *testing.T) {
 			defer child.Kill()
 			out := &consoleResponder{input: p}
 			wantCode := 0
-			if mode == "interactive" {
+			if promptCase != nil {
+				out.responses = promptCase.responses("\x1a\r")
+			} else if mode == "interactive" {
 				out.responses = []consoleResponse{{"input0:", "日本語\r"}, {"input1:", "second\r"}}
 			} else if mode == "ctrlc" {
 				wantCode = 130
 				out.responses = []consoleResponse{{"ready", "\x03"}}
+			} else if mode == "catch-exit" {
+				wantCode = 7
+				out.responses = []consoleResponse{{"ready", "\x03"}}
+			} else if mode == "catch-twice" {
+				wantCode = 7
+				out.responses = []consoleResponse{{"ready", "\x03"}, {"first interrupt handled", "\x03"}}
+			} else if mode == "ignore-repeat" {
+				out.responses = []consoleResponse{
+					{"ready", "\x03"}, {"first interrupt ignored", "\x1b[67;46;99;1;8;1_\x1b[67;46;99;1;8;2_\x1b[67;46;99;0;8;1_"}, {"still running>", "continue\r"},
+				}
+			} else if mode == "limit-input" {
+				wantCode = 1
+				out.responses = []consoleResponse{{"post-limit>", "still interactive\r"}, {"選択 [a/l/N]:", "l\r"}}
+			} else if mode == "limit-interrupt" {
+				wantCode = 130
+				out.responses = []consoleResponse{{"post-limit>", "\x03"}}
 			}
 			readDone := make(chan error, 1)
 			go func() { _, err := io.Copy(out, reader); readDone <- err }()
@@ -99,6 +137,13 @@ func TestCLIWindowsInteractionAndCtrlC(t *testing.T) {
 				}
 				return
 			}
+			if promptCase != nil {
+				if waitErr != nil || closeErr != nil || readErr != nil {
+					t.Fatalf("wait=%v close=%v read=%v output=%q", waitErr, closeErr, readErr, out.String())
+				}
+				promptCase.check(t, dir, out)
+				return
+			}
 			if waitErr != nil || closeErr != nil || readErr != nil || len(out.responses) != 0 || !strings.Contains(out.String(), fmt.Sprintf("CLI_RESULT:%d:restored=true", wantCode)) {
 				t.Fatalf("wait=%v close=%v read=%v output=%q", waitErr, closeErr, readErr, out.String())
 			}
@@ -108,11 +153,41 @@ func TestCLIWindowsInteractionAndCtrlC(t *testing.T) {
 			if mode == "size" && !strings.Contains(out.String(), "size:80:12:<nil>") {
 				t.Fatalf("host terminal rows not used: %q", out.String())
 			}
-			paths := imageFiles(t, dir, "png")
-			if len(paths) != 1 || (mode == "ctrlc" && !strings.Contains(paths[0], "-partial_001")) {
+			extension, expected := "png", 1
+			if wantCode == 130 {
+				expected = 0
+			}
+			if strings.HasPrefix(mode, "limit-") {
+				extension = "svg"
+			}
+			if mode == "limit-input" {
+				expected = 2
+				if !strings.Contains(out.String(), "received:still interactive") {
+					t.Fatalf("input after limit lost: %q", out.String())
+				}
+			}
+			if mode == "catch-twice" && !strings.Contains(out.String(), "second interrupt handled") {
+				t.Fatalf("second key was not forwarded: %q", out.String())
+			}
+			if mode == "ignore-repeat" && !strings.Contains(out.String(), "continued after interrupts") {
+				t.Fatalf("target did not continue after repeated input: %q", out.String())
+			}
+			paths := imageFiles(t, dir, extension)
+			if len(paths) != expected {
 				t.Fatalf("paths=%v output=%q", paths, out.String())
 			}
-			readImage(t, paths[0])
+			for _, path := range paths {
+				readImage(t, path)
+			}
 		})
 	}
+}
+
+func ignoreTestInterrupt() error {
+	setHandler := windows.NewLazySystemDLL("kernel32.dll").NewProc("SetConsoleCtrlHandler")
+	ok, _, err := setHandler.Call(0, 1)
+	if ok == 0 {
+		return err
+	}
+	return nil
 }

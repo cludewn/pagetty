@@ -2,7 +2,9 @@ package render
 
 import (
 	"bytes"
+	"context"
 	_ "embed"
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
@@ -26,9 +28,11 @@ const (
 )
 
 type Options struct {
-	MaxLines int                   // 正の最大表示行数。
-	Format   Format                // 空ならPNG。
-	Progress func(done, total int) // 分割後と各ページ生成後に同期的に呼ぶ。
+	PageLimit   int
+	MaxLines    int                                                      // 正の最大表示行数。
+	Format      Format                                                   // 空ならPNG。
+	ChoosePages func(total, available int, hardLimit Limit) (int, error) // 設定超過時に希望枚数を返す。0は保存しない。
+	Progress    func(done, total int)                                    // 保存範囲の確定後と各ページ生成後に同期的に呼ぶ。
 }
 
 type Image struct {
@@ -38,13 +42,20 @@ type Image struct {
 }
 
 const (
-	cellWidth  = 10
-	lineHeight = 28
-	fontSize   = 20
-	baseline   = 21
-	padding    = 16
-	maxSide    = 32768
-	maxPixels  = 16 * 1024 * 1024
+	cellWidth        = 10
+	lineHeight       = 28
+	fontSize         = 20
+	baseline         = 21
+	padding          = 16
+	maxSide          = 32768
+	maxPixels        = 16 * 1024 * 1024
+	MaxColumns       = (maxSide - 2*padding) / cellWidth
+	DefaultPageLimit = 16
+	MaxPages         = 64
+	maxPNGPixels     = 32 * 1024 * 1024
+	maxSVGBytes      = 16 * 1024 * 1024
+	maxImageBytes    = 8 * 1024 * 1024
+	maxTotalBytes    = 64 * 1024 * 1024
 )
 
 //go:embed fonts/BIZUDGothic-Regular.ttf
@@ -53,58 +64,146 @@ var regularFont []byte
 //go:embed fonts/BIZUDGothic-Bold.ttf
 var boldFont []byte
 
-// Render は分割した各ページの画像を返す。保存は行わず、失敗時は画像を返さない。
-func Render(doc display.Document, options Options) ([]Image, error) {
+// PageLines は指定した最大行数を画像の寸法制限内に収める。
+func PageLines(columns, lines int) (int, error) {
+	if columns < 1 || columns > MaxColumns || lines < 1 {
+		return 0, fmt.Errorf("invalid columns or lines: %d, %d", columns, lines)
+	}
+	width := columns*cellWidth + 2*padding
+	return min(lines, (min(maxSide, maxPixels/width)-2*padding)/lineHeight), nil
+}
+
+type Limit string
+
+func (l Limit) Error() string { return string(l) }
+
+const (
+	limitPages       Limit = "最大生成ページ数"
+	limitPageSetting Limit = "設定上限のページ数"
+	limitPixels      Limit = "PNGの合計描画画素数"
+	limitSVG         Limit = "内部SVGのサイズ"
+	limitImage       Limit = "画像1枚のサイズ"
+	limitTotal       Limit = "画像の合計サイズ"
+)
+
+// RenderPages は空行を考慮したページを先頭から生成し、各画像を同期的に渡す。
+func RenderPages(ctx context.Context, doc display.Document, options Options, emit func(Image) error) (Limit, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	format := options.Format
 	if format == "" {
 		format = PNG
 	}
 	if format != PNG && format != SVG {
-		return nil, fmt.Errorf("unsupported image format: %q", format)
+		return "", fmt.Errorf("unsupported image format: %q", format)
 	}
-	pages, err := Split(doc, options.MaxLines)
+	lines, err := PageLines(doc.Columns, options.MaxLines)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
-	if len(pages) == 0 {
-		return nil, nil
+	if options.PageLimit < 1 || options.PageLimit > MaxPages {
+		return "", fmt.Errorf("invalid page limit: %d", options.PageLimit)
+	}
+	pages, err := split(ctx, doc, lines)
+	if err != nil || len(pages) == 0 {
+		return "", err
+	}
+	available, hardLimit := availablePages(pages, format)
+	count := min(len(pages), options.PageLimit)
+	var limit Limit
+	if len(pages) > options.PageLimit {
+		if options.ChoosePages == nil {
+			limit = limitPageSetting
+		} else {
+			count, err = options.ChoosePages(len(pages), available, hardLimit)
+			if err != nil {
+				return "", err
+			}
+			if count < 0 || count > len(pages) {
+				return "", fmt.Errorf("invalid selected page count: %d", count)
+			}
+		}
+	}
+	if count > available {
+		count, limit = available, hardLimit
+	}
+	if count == 0 {
+		return limit, ctx.Err()
+	}
+	pages = pages[:count]
+	if err := ctx.Err(); err != nil {
+		return "", err
 	}
 	if options.Progress != nil {
 		options.Progress(0, len(pages))
 	}
-	if err := validate(doc); err != nil {
-		return nil, err
+	if err := ctx.Err(); err != nil {
+		return "", err
 	}
 	regular, err := loadFont(regularFont)
 	if err != nil {
-		return nil, fmt.Errorf("load regular font: %w", err)
+		return "", fmt.Errorf("load regular font: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
 	}
 	bold, err := loadFont(boldFont)
 	if err != nil {
-		return nil, fmt.Errorf("load bold font: %w", err)
+		return "", fmt.Errorf("load bold font: %w", err)
 	}
-	var images []Image
+	var size int
 	for i, page := range pages {
-		result, err := drawPage(page, regular, bold)
+		if err := validate(ctx, page); err != nil {
+			return "", fmt.Errorf("page %d: %w", i+1, err)
+		}
+		img, err := drawPage(ctx, page, regular, bold, format, maxTotalBytes-size)
 		if err != nil {
-			return nil, fmt.Errorf("page %d: %w", i+1, err)
+			var reached Limit
+			if errors.As(err, &reached) {
+				return reached, nil
+			}
+			return "", fmt.Errorf("page %d: %w", i+1, err)
 		}
-		var data bytes.Buffer
-		if err := encode(&data, result, format); err != nil {
-			return nil, fmt.Errorf("page %d: encode %s: %w", i+1, format, err)
+		if err := ctx.Err(); err != nil {
+			return "", err
 		}
-		result.Format, result.Data = format, data.Bytes()
-		images = append(images, result)
+		if err := emit(img); err != nil {
+			return limit, err
+		}
 		if options.Progress != nil {
 			options.Progress(i+1, len(pages))
 		}
+		size += len(img.Data)
 	}
-	return images, nil
+	return limit, ctx.Err()
 }
 
-func validate(doc display.Document) error {
+// 画像を描画する前に確定できる制限だけを調べる。
+func availablePages(pages []display.Document, format Format) (int, Limit) {
+	count := min(len(pages), MaxPages)
+	if format == PNG {
+		remaining := maxPNGPixels
+		for i, page := range pages[:count] {
+			width, height := page.Columns*cellWidth+2*padding, len(page.Rows)*lineHeight+2*padding
+			remaining -= width * height
+			if remaining < 0 {
+				return i, limitPixels
+			}
+		}
+	}
+	if count < len(pages) {
+		return count, limitPages
+	}
+	return count, ""
+}
+
+func validate(ctx context.Context, doc display.Document) error {
 	var segments segmenter.Segmenter
 	for i, row := range doc.Rows {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		column := 0
 		for j, cell := range row.Cells {
 			invalid := func(reason string) error {
@@ -143,20 +242,27 @@ type glyphKey struct {
 	bold bool
 }
 
-func drawPage(doc display.Document, regular, bold *loadedFont) (Image, error) {
-	// SVGでも同じ上限にし、PNG化で過大なメモリを確保しない。
-	if doc.Columns > (maxSide-2*padding)/cellWidth || len(doc.Rows) > (maxSide-2*padding)/lineHeight {
-		return Image{}, fmt.Errorf("image dimensions exceed %d pixels", maxSide)
-	}
+func drawPage(ctx context.Context, doc display.Document, regular, bold *loadedFont, format Format, remaining int) (Image, error) {
 	w, h := doc.Columns*cellWidth+2*padding, len(doc.Rows)*lineHeight+2*padding
-	if maxPixels/w < h {
-		return Image{}, fmt.Errorf("image exceeds %d pixels", maxPixels)
+	finalBytes := min(maxImageBytes, remaining)
+	finalLimit := limitImage
+	if remaining < maxImageBytes {
+		finalLimit = limitTotal
 	}
-	var data bytes.Buffer
+	data := pageBuffer{ctx: ctx, maxBytes: maxSVGBytes, limit: limitSVG}
+	if format == SVG {
+		data.maxBytes, data.limit = finalBytes, finalLimit
+	}
 	fmt.Fprintf(&data, `<svg xmlns="http://www.w3.org/2000/svg" width="%dpx" height="%dpx" viewBox="0 0 %d %d">`, w, h, w, h)
 	rect(&data, 0, 0, w, h, defaultBackground)
 	paths := make(map[glyphKey]glyphPath)
 	for i, row := range doc.Rows {
+		if data.err != nil {
+			return Image{}, data.err
+		}
+		if err := ctx.Err(); err != nil {
+			return Image{}, err
+		}
 		column := 0
 		y := padding + i*lineHeight
 		// 後続セルの背景で斜体や結合文字の端を消さないよう、背景を先に描く。
@@ -177,6 +283,9 @@ func drawPage(doc display.Document, regular, bold *loadedFont) (Image, error) {
 		}
 		column = 0
 		for j, cell := range row.Cells {
+			if data.err != nil {
+				return Image{}, data.err
+			}
 			key := glyphKey{cell.Text, cell.Style.Bold}
 			path, ok := paths[key]
 			if !ok {
@@ -214,30 +323,123 @@ func drawPage(doc display.Document, regular, bold *loadedFont) (Image, error) {
 			column += cell.Width
 		}
 	}
-	data.WriteString(`</svg>`)
-	return Image{Format: SVG, Width: w, Height: h, Data: data.Bytes()}, nil
+	fmt.Fprint(&data, "</svg>")
+	if data.err != nil {
+		return Image{}, data.err
+	}
+	if format == SVG {
+		return Image{Format: format, Width: w, Height: h, Data: data.buf}, nil
+	}
+	encoded := pageBuffer{ctx: ctx, maxBytes: finalBytes, limit: finalLimit}
+	if err := encodePNG(ctx, &encoded, data.buf, w, h); err != nil {
+		return Image{}, err
+	}
+	return Image{Format: format, Width: w, Height: h, Data: encoded.buf}, nil
 }
 
-func rect(w *bytes.Buffer, x, y, width, height int, c color.RGBA) {
+type pageBuffer struct {
+	buf      []byte
+	ctx      context.Context
+	maxBytes int
+	limit    Limit
+	err      error
+}
+
+func (b *pageBuffer) Write(p []byte) (int, error) {
+	if b.err == nil {
+		b.err = b.ctx.Err()
+	}
+	if b.err == nil && len(p) > b.maxBytes-len(b.buf) {
+		b.err = b.limit
+	}
+	if b.err != nil {
+		return 0, b.err
+	}
+	if needed := len(b.buf) + len(p); needed > cap(b.buf) {
+		grown := make([]byte, len(b.buf), min(b.maxBytes, max(needed, 2*cap(b.buf), 512)))
+		copy(grown, b.buf)
+		b.buf = grown
+	}
+	b.buf = append(b.buf, p...)
+	return len(p), nil
+}
+
+func rect(w io.Writer, x, y, width, height int, c color.RGBA) {
 	fmt.Fprintf(w, `<rect x="%d" y="%d" width="%d" height="%d" fill="#%02x%02x%02x"/>`, x, y, width, height, c.R, c.G, c.B)
 }
 
-func encode(w io.Writer, svg Image, format Format) error {
-	if format == SVG {
-		_, err := io.Copy(w, bytes.NewReader(svg.Data))
-		return err
-	}
-	return encodePNG(w, svg.Data, svg.Width, svg.Height)
+type svgReader struct {
+	ctx    context.Context
+	reader *bytes.Reader
 }
 
-func encodePNG(w io.Writer, data []byte, width, height int) error {
-	icon, err := oksvg.ReadIconStream(bytes.NewReader(data), oksvg.StrictErrorMode)
+func (r svgReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.reader.Read(p)
+}
+
+func encodePNG(ctx context.Context, w io.Writer, data []byte, width, height int) error {
+	icon, err := oksvg.ReadIconStream(svgReader{ctx, bytes.NewReader(data)}, oksvg.StrictErrorMode)
 	if err != nil {
 		return fmt.Errorf("parse generated SVG: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	img := image.NewRGBA(image.Rect(0, 0, width, height))
 	icon.SetTarget(0, 0, float64(width), float64(height))
 	scanner := newPNGScanner(img)
-	icon.Draw(rasterx.NewDasher(width, height, scanner), 1)
-	return png.Encode(w, img)
+	dasher := rasterx.NewDasher(width, height, scanner)
+	for _, path := range icon.SVGPaths {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		path.DrawTransformed(dasher, 1, icon.Transform)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := encodePixels(ctx, w, img); err != nil {
+		return err
+	}
+	return ctx.Err()
+}
+
+// png.Encodeには行境界のキャンセルAPIがない。高圧縮時にも
+// 書き込みを待たずに抜けるため、行の先頭で専用の中断値を返す。
+type pngCanceled struct{ err error }
+
+type interruptibleImage struct {
+	*image.RGBA
+	ctx   context.Context
+	pixel color.RGBA
+}
+
+func (m *interruptibleImage) At(x, y int) color.Color {
+	if x == m.Rect.Min.X {
+		if err := m.ctx.Err(); err != nil {
+			panic(pngCanceled{err})
+		}
+	}
+	// エンコーダーはAtの戻り値を同期的に色へ変換する。
+	m.pixel = m.RGBAAt(x, y)
+	return &m.pixel
+}
+
+func encodePixels(ctx context.Context, w io.Writer, img *image.RGBA) (err error) {
+	if ctx.Done() == nil {
+		return png.Encode(w, img)
+	}
+	defer func() {
+		if value := recover(); value != nil {
+			if canceled, ok := value.(pngCanceled); ok {
+				err = canceled.err
+			} else {
+				panic(value)
+			}
+		}
+	}()
+	return png.Encode(w, &interruptibleImage{RGBA: img, ctx: ctx})
 }
