@@ -14,9 +14,11 @@ import (
 )
 
 type stagedImage struct {
-	path   string
-	format render.Format
-	info   os.FileInfo
+	path     string
+	format   render.Format
+	info     os.FileInfo
+	file     *os.File // Windowsでは公開前に確認した同じファイルを閉じずに保持する。
+	replaced bool
 }
 
 type imageSave struct {
@@ -69,7 +71,7 @@ func (s *imageSave) add(ctx context.Context, img render.Image) error {
 		return fmt.Errorf("%s: %w", path, err)
 	}
 	s.incomplete = ""
-	s.staged = append(s.staged, stagedImage{path, img.Format, info})
+	s.staged = append(s.staged, stagedImage{path: path, format: img.Format, info: info})
 	return ctx.Err()
 }
 
@@ -85,12 +87,13 @@ func (s *imageSave) publish(ctx context.Context, timestamp string, partial bool)
 	if partial {
 		prefix += "-partial"
 	}
-	for i, img := range s.staged {
+	for i := range s.staged {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		img := &s.staged[i]
 		path := filepath.Join(s.dir, fmt.Sprintf("%s_%03d.%s", prefix, i+1, img.format))
-		if err := publishImage(img.path, path); err != nil {
+		if err := img.publish(path); err != nil {
 			return err
 		}
 		s.published = append(s.published, path)
@@ -104,9 +107,17 @@ func (s *imageSave) close(discard bool) error {
 		for i, path := range s.published {
 			info, err := os.Lstat(path)
 			if err == nil {
-				if os.SameFile(info, s.staged[i].info) {
+				img := s.staged[i]
+				expected := img.info
+				if img.file != nil {
+					expected, err = img.file.Stat()
+				}
+				switch {
+				case err != nil:
+					err = fmt.Errorf("公開画像の同一性を取得できません: %s: %w", path, err)
+				case os.SameFile(info, expected):
 					err = os.Remove(path)
-				} else {
+				default:
 					err = fmt.Errorf("公開画像が置き換えられたため削除できません: %s", path)
 				}
 			}
@@ -114,7 +125,12 @@ func (s *imageSave) close(discard bool) error {
 		}
 	}
 	for _, img := range s.staged {
-		result = errors.Join(result, ignoreMissing(os.Remove(img.path)))
+		if img.file != nil {
+			result = errors.Join(result, img.file.Close())
+		}
+		if !img.replaced {
+			result = errors.Join(result, ignoreMissing(os.Remove(img.path)))
+		}
 	}
 	if s.incomplete != "" {
 		result = errors.Join(result, ignoreMissing(os.Remove(s.incomplete)))

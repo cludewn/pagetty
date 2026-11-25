@@ -1,9 +1,10 @@
 package render
 
 import (
+	"bytes"
 	"context"
 	"errors"
-	"strings"
+	"image"
 	"testing"
 
 	"github.com/cludewn/pagetty/internal/display"
@@ -86,28 +87,27 @@ func TestRenderCancelAfterFirstPage(t *testing.T) {
 }
 
 func TestPNGCancelDuringEncoding(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	w := &cancelPNGWriter{
-		cancel: cancel,
-		output: pageBuffer{ctx: ctx, maxBytes: maxImageBytes, limit: limitImage},
-	}
-	data := []byte("<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 160 160'><rect width='160' height='160'/></svg>")
-	err := encodePNG(ctx, w, data, 160, 160)
-	if !errors.Is(err, context.Canceled) || !strings.HasPrefix(string(w.output.buf), "\x89PNG") || w.accepted != 1 {
-		t.Fatalf("err=%v writes=%d first=%q", err, w.accepted, w.output.buf)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	w := &cancelPNGWriter{cancel: cancel}
+	err := encodePixels(ctx, w, image.NewRGBA(image.Rect(0, 0, 160, 160)))
+	if !errors.Is(err, context.Canceled) || w.Len() != pngHeaderAndIHDR ||
+		!bytes.HasPrefix(w.Bytes(), []byte("\x89PNG\r\n\x1a\n")) || string(w.Bytes()[12:16]) != "IHDR" {
+		t.Fatalf("err=%v output size=%d want only a PNG signature and complete IHDR", err, w.Len())
 	}
 }
 
+const pngHeaderAndIHDR = 8 + 4 + 4 + 13 + 4 // PNG署名、長さ、種別、IHDR本体、CRC。
+
 type cancelPNGWriter struct {
-	cancel   context.CancelFunc
-	output   pageBuffer
-	accepted int
+	bytes.Buffer
+	cancel context.CancelFunc
 }
 
 func (w *cancelPNGWriter) Write(p []byte) (int, error) {
-	n, err := w.output.Write(p)
-	if err == nil {
-		w.accepted++
+	n, err := w.Buffer.Write(p)
+	// IHDRの直後に中断し、それ以降も書き込み自体は成功させる。
+	if w.Len() >= pngHeaderAndIHDR {
 		w.cancel()
 	}
 	return n, err

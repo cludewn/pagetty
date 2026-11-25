@@ -4,6 +4,6 @@ package main
 
 import "os"
 
-func publishImage(source, target string) error {
-	return os.Link(source, target)
+func (img *stagedImage) publish(target string) error {
+	return os.Link(img.path, target)
 }

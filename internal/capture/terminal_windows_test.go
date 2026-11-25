@@ -213,7 +213,7 @@ func TestWindowsPipeStopUnblocksIO(t *testing.T) {
 				t.Fatalf("I/O did not block: %v", err)
 			case <-time.After(20 * time.Millisecond):
 			}
-			if err := p.stop(); err != nil {
+			if err := p.stop(false); err != nil {
 				t.Fatal(err)
 			}
 			select {
@@ -226,5 +226,25 @@ func TestWindowsPipeStopUnblocksIO(t *testing.T) {
 				t.Fatal("I/O did not stop")
 			}
 		})
+	}
+}
+
+func TestWindowsPipeCloseIsIdempotent(t *testing.T) {
+	server, client, err := consolePipe(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer windows.CloseHandle(client)
+	p := &overlappedPipe{handle: server}
+	for i := range 2 {
+		if err := p.Close(); err != nil {
+			t.Fatalf("Close #%d: %v", i+1, err)
+		}
+	}
+	if err := p.stop(true); err != nil {
+		t.Fatalf("stop after Close: %v", err)
+	}
+	if _, err := p.Read(make([]byte, 1)); !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("Read after Close: %v", err)
 	}
 }

@@ -205,7 +205,12 @@ func TestPublishImageDoesNotReplaceExisting(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := publishImage(src, dst); err == nil {
+	info, err := os.Lstat(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	img := stagedImage{path: src, info: info}
+	if err := img.publish(dst); err == nil {
 		t.Fatal("existing output overwritten")
 	}
 	if data, err := os.ReadFile(dst); err != nil || string(data) != "keep" {
@@ -291,4 +296,29 @@ func (d *saveFailureDiagnostic) Write(p []byte) (int, error) {
 		d.fail = nil
 	}
 	return d.Buffer.Write(p)
+}
+
+func TestSaveRollbackPreservesReplacement(t *testing.T) {
+	dir := t.TempDir()
+	save := imageSave{dir: dir}
+	ctx := t.Context()
+	if err := save.add(ctx, render.Image{Format: render.SVG, Data: []byte("generated")}); err != nil {
+		t.Fatal(err)
+	}
+	if err := save.publish(ctx, "20261122-123045", false); err != nil {
+		t.Fatal(err)
+	}
+	path := save.published[0]
+	if err := os.Rename(path, path+".moved"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("replacement"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := save.close(true); err == nil || !strings.Contains(err.Error(), "置き換えられたため削除できません") {
+		t.Fatalf("rollback error=%v", err)
+	}
+	if got, err := os.ReadFile(path); err != nil || string(got) != "replacement" {
+		t.Fatalf("replacement=%q err=%v", got, err)
+	}
 }

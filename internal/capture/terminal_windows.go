@@ -70,13 +70,23 @@ func (p *overlappedPipe) transfer(data []byte, op func(windows.Handle, []byte, *
 	return int(n), err
 }
 
-func (p *overlappedPipe) stop() error {
+func (p *overlappedPipe) stop(disconnect bool) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.handle == 0 {
+		return nil
+	}
 	p.stopped = true
 	err := windows.CancelIoEx(p.handle, nil)
 	if errors.Is(err, windows.ERROR_NOT_FOUND) {
-		return nil
+		err = nil
+	}
+	if disconnect {
+		// 古いWindowsでは排出不能な出力があるとClosePseudoConsoleも戻らない。
+		disconnectErr := windows.DisconnectNamedPipe(p.handle)
+		if !errors.Is(disconnectErr, windows.ERROR_PIPE_NOT_CONNECTED) {
+			err = errors.Join(err, disconnectErr)
+		}
 	}
 	return err
 }
@@ -84,7 +94,15 @@ func (p *overlappedPipe) stop() error {
 func (p *overlappedPipe) Close() error {
 	p.ioMu.Lock()
 	defer p.ioMu.Unlock()
-	return windows.CloseHandle(p.handle)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.handle == 0 {
+		return nil
+	}
+	handle := p.handle
+	p.handle = 0
+	p.stopped = true
+	return windows.CloseHandle(handle)
 }
 
 func openPTY(columns, rows int) (xpty.Pty, io.ReadCloser, error) {
@@ -185,18 +203,11 @@ func closePTY(p xpty.Pty) error {
 }
 
 func stopPTYInput(p xpty.Pty) error {
-	return p.(*windowsPTY).input.stop()
+	return p.(*windowsPTY).input.stop(false)
 }
 
 func stopPTYOutput(_ xpty.Pty, reader io.ReadCloser) error {
-	r := reader.(*overlappedPipe)
-	err := r.stop()
-	// 古いWindowsでは排出不能な出力があるとClosePseudoConsoleも戻らない。
-	disconnectErr := windows.DisconnectNamedPipe(r.handle)
-	if errors.Is(disconnectErr, windows.ERROR_PIPE_NOT_CONNECTED) {
-		disconnectErr = nil
-	}
-	return errors.Join(err, disconnectErr)
+	return reader.(*overlappedPipe).stop(true)
 }
 
 func stopDescendants(int) error { return nil } // ConPTYの終了で接続中のプロセスを閉じる。
