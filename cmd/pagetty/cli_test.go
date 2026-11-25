@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"reflect"
 	"strconv"
@@ -64,6 +65,73 @@ func TestCLIChild(t *testing.T) {
 			}
 		case "missing-glyph":
 			fmt.Print("A日éＡ\x1b[31;1m🚀\x1b[0mZ")
+		case "count":
+			count, _ := strconv.Atoi(os.Args[i+2])
+			for n := range count {
+				fmt.Printf("line%d\n", n)
+			}
+			if i+3 < len(os.Args) {
+				code, _ := strconv.Atoi(os.Args[i+3])
+				os.Exit(code)
+			}
+		case "limit-input", "limit-interrupt":
+			fmt.Print("first\nsecond\n" + strings.Repeat("more\n", 1800) + "post-limit>")
+			if os.Args[i+1] == "limit-interrupt" {
+				time.Sleep(time.Minute)
+			}
+			line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+			if err != nil {
+				os.Exit(9)
+			}
+			fmt.Printf("received:%s", line)
+		case "ignore-repeat":
+			if err := ignoreTestInterrupt(); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(15)
+			}
+			fmt.Print("ready")
+			time.Sleep(200 * time.Millisecond)
+			fmt.Print("\nfirst interrupt ignored")
+			time.Sleep(200 * time.Millisecond)
+			fmt.Print("\nstill running>")
+			line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+			if err != nil || strings.TrimSpace(line) != "continue" {
+				os.Exit(16)
+			}
+			fmt.Print("continued after interrupts")
+		case "raw-key":
+			old, err := term.MakeRaw(int(os.Stdin.Fd()))
+			if err != nil {
+				os.Exit(13)
+			}
+			fmt.Print("ready")
+			var key [1]byte
+			_, err = io.ReadFull(os.Stdin, key[:])
+			_ = term.Restore(int(os.Stdin.Fd()), old)
+			if err != nil || key[0] != 3 {
+				os.Exit(14)
+			}
+			fmt.Print("raw key received")
+		case "catch-exit", "catch-twice":
+			intr := make(chan os.Signal, 1)
+			signal.Notify(intr, os.Interrupt)
+			fmt.Print("ready")
+			<-intr
+			fmt.Print("\nfirst interrupt handled")
+			if os.Args[i+1] != "catch-exit" {
+				<-intr
+				fmt.Print("\nsecond interrupt handled")
+			}
+			os.Exit(7)
+		case "updated-only":
+			fmt.Print("NEW")
+		case "cursor-update":
+			fmt.Print("old\x1b[4;1H")
+			time.Sleep(cliTestCommandWait)
+			fmt.Print("\x1b[1;1H\rNEW")
+		case "notice-tail":
+			fmt.Print(strings.Repeat("line\n", 1500) + "OUTPUT-TAIL")
+			time.Sleep(cliTestCommandWait)
 		case "long":
 			for i := range 81 {
 				fmt.Printf("line%d\n", i)
@@ -113,7 +181,9 @@ func runTestCLI(t *testing.T, args []string) (int, string, string) {
 func TestCLIHelpAndInvalidArguments(t *testing.T) {
 	for _, args := range [][]string{{"--help"}, {"-h"}} {
 		code, output, diagnostics := runTestCLI(t, args)
-		if code != 0 || strings.Contains(output, "pagetty capture") || !strings.Contains(output, "pagetty [options] -- <command> [args...]") || !strings.Contains(output, "--format svg") || diagnostics != "" {
+		if code != 0 || strings.Contains(output, "pagetty capture") || !strings.Contains(output, "pagetty [options] -- <command> [args...]") || !strings.Contains(output, "--format svg") ||
+			!strings.Contains(output, "page-limit") || strings.Contains(output, "max-pages") ||
+			!strings.Contains(output, "a は保存可能な全ページ、l は設定上限までを保存します。n・Enter・EOFは保存しません。") || diagnostics != "" {
 			t.Fatalf("args=%q code=%d output=%q diagnostics=%q", args, code, output, diagnostics)
 		}
 	}
@@ -121,7 +191,7 @@ func TestCLIHelpAndInvalidArguments(t *testing.T) {
 		nil, {"echo", "text"}, {"--format", "svg", "echo"}, {"--help", "extra"},
 		{"--"}, {"--format", "svg", "--"}, {"--", ""}, {"unexpected", "--", "echo"},
 		{"capture", "--help"}, {"capture", "--", "echo"}, {"--help", "--", "echo"},
-		{"--unknown", "--", "echo"}, {"--columns", "--", "echo"}, {"--columns", "x", "--", "echo"},
+		{"--unknown", "--", "echo"}, {"--max-pages", "16", "--", "echo"}, {"--columns", "--", "echo"}, {"--columns", "x", "--", "echo"},
 	} {
 		code, _, diagnostics := runTestCLI(t, args)
 		if code != 2 || diagnostics == "" {
@@ -130,7 +200,7 @@ func TestCLIHelpAndInvalidArguments(t *testing.T) {
 	}
 	for _, options := range [][]string{
 		{"--format", "jpeg"}, {"--columns", "1"}, {"--columns", "32768"},
-		{"--max-lines", "0"}, {"--max-lines", "-1"}, {"--output-dir", ""},
+		{"--page-limit", "0"}, {"--page-limit", "65"}, {"--max-lines", "0"}, {"--max-lines", "-1"}, {"--output-dir", ""},
 	} {
 		code, output, diagnostics := runTestCLI(t, cliArgs(options, "text"))
 		if code != 2 || output != "" || !strings.Contains(diagnostics, "引数エラー") {
@@ -397,7 +467,7 @@ func TestCLINonzeroAndFailures(t *testing.T) {
 		code, pages         int
 	}{
 		{"child failure", "nonzero", "対象プログラムの終了失敗: 終了コード 7", nil, 7, 1},
-		{"render failure", "nonzero", "レンダリング失敗", []string{"--columns", "32767"}, 1, 0},
+		{"invalid dimensions", "nonzero", "引数エラー", []string{"--columns", "32767"}, 2, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := filepath.Join(t.TempDir(), "images")
@@ -425,7 +495,7 @@ func TestCLINonzeroAndFailures(t *testing.T) {
 		t.Fatal(err)
 	}
 	code, _, diagnostics := runTestCLI(t, cliArgs([]string{"--output-dir", blocker}, "nonzero"))
-	if code != 1 || !strings.Contains(diagnostics, "画像保存失敗（0/1ページ保存）") || !strings.Contains(diagnostics, "終了コード 7") || strings.Contains(diagnostics, "pagetty: Saved ") {
+	if code != 1 || !strings.Contains(diagnostics, "画像保存失敗:") || !strings.Contains(diagnostics, blocker) || !strings.Contains(diagnostics, "終了コード 7") || strings.Contains(diagnostics, "pagetty: Saved ") {
 		t.Fatalf("code=%d diagnostics=%q", code, diagnostics)
 	}
 	data, err := os.ReadFile(blocker)
@@ -468,6 +538,12 @@ func TestCLIPartialRecords(t *testing.T) {
 			var diagnostics bytes.Buffer
 			code := runCLI(ctx, cliArgs([]string{"--output-dir", dir}, "block"), nil, output, &diagnostics)
 			paths := imageFiles(t, dir, "png")
+			if interrupted {
+				if code != 130 || !strings.Contains(diagnostics.String(), message) || len(paths) != 0 {
+					t.Fatalf("code=%d paths=%v diagnostics=%q", code, paths, diagnostics.String())
+				}
+				return
+			}
 			if code != wantCode || !strings.Contains(diagnostics.String(), "PTY実行・記録失敗") || !strings.Contains(diagnostics.String(), message) || len(paths) != 1 || !strings.Contains(paths[0], "-partial_001") {
 				t.Fatalf("code=%d paths=%v diagnostics=%q", code, paths, diagnostics.String())
 			}
@@ -479,7 +555,7 @@ func TestCLIPartialRecords(t *testing.T) {
 	}
 }
 
-func TestCLIInterruptedSaveFailure(t *testing.T) {
+func TestCLIInterruptedDoesNotOpenSaveTarget(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "file")
 	if err := os.WriteFile(path, []byte("keep"), 0600); err != nil {
 		t.Fatal(err)
@@ -488,7 +564,7 @@ func TestCLIInterruptedSaveFailure(t *testing.T) {
 	defer cancel()
 	var diagnostics bytes.Buffer
 	code := runCLI(ctx, cliArgs([]string{"--output-dir", path}, "block"), nil, cancelOutput{cancel}, &diagnostics)
-	if code != 1 || !strings.Contains(diagnostics.String(), "中断されました") || !strings.Contains(diagnostics.String(), "画像保存失敗") || strings.Contains(diagnostics.String(), "pagetty: Saved ") || strings.Contains(diagnostics.String(), "Partial capture:") {
+	if code != 130 || !strings.Contains(diagnostics.String(), "中断されました") || strings.Contains(diagnostics.String(), "画像保存失敗") || strings.Contains(diagnostics.String(), "pagetty: Saved ") || strings.Contains(diagnostics.String(), "Partial capture:") {
 		t.Fatalf("code=%d diagnostics=%q", code, diagnostics.String())
 	}
 }
@@ -556,7 +632,7 @@ func (w *consoleResponder) Write(p []byte) (int, error) {
 
 func TestCLIReportDefaults(t *testing.T) {
 	code, help, _ := runTestCLI(t, []string{"--help"})
-	if code != 0 || !strings.Contains(help, "default 80") || !strings.Contains(help, "default 44") {
+	if code != 0 || !strings.Contains(help, "default 80") || !strings.Contains(help, "default 44") || !strings.Contains(help, "default 16") {
 		t.Fatalf("help: %s", help)
 	}
 	for _, format := range []string{"png", "svg"} {
@@ -567,5 +643,72 @@ func TestCLIReportDefaults(t *testing.T) {
 			t.Fatalf("fallback: %d %v %s", code, paths, d)
 		}
 		readImage(t, paths[0])
+	}
+}
+
+func TestCLIPageLimitNonInteractive(t *testing.T) {
+	for _, tc := range []struct {
+		count, pages, code int
+		explicit           string
+	}{
+		{15, 15, 0, ""}, {16, 16, 0, ""}, {17, 16, 1, ""}, {65, 64, 1, "64"}, {2, 1, 1, "1"},
+	} {
+		dir := t.TempDir()
+		options := []string{"--format", "svg", "--max-lines", "1", "--output-dir", dir}
+		if tc.explicit != "" {
+			options = append(options, "--page-limit", tc.explicit)
+		}
+		code, output, diagnostics := runTestCLI(t, cliArgs(options, "count", strconv.Itoa(tc.count)))
+		paths := imageFiles(t, dir, "svg")
+		if code != tc.code || len(paths) != tc.pages || !strings.Contains(output, fmt.Sprintf("line%d", tc.count-1)) {
+			t.Fatalf("case=%+v code=%d pages=%d diagnostics=%q", tc, code, len(paths), diagnostics)
+		}
+		if partial := code == 1; strings.Contains(paths[0], "-partial_") != partial ||
+			(strings.Count(diagnostics, "画像生成を打ち切りました") == 1) != partial ||
+			strings.Contains(diagnostics, "記録を打ち切りました") || strings.Contains(diagnostics, "選択 [") ||
+			strings.Contains(diagnostics, "対象の終了コード 0") != partial {
+			t.Fatalf("partial=%t path=%s diagnostics=%q", partial, paths[0], diagnostics)
+		}
+		for _, path := range paths {
+			readImage(t, path)
+		}
+	}
+}
+
+type cancelAtDiagnostic struct {
+	bytes.Buffer
+	match  string
+	cancel context.CancelFunc
+}
+
+func (d *cancelAtDiagnostic) Write(p []byte) (int, error) {
+	n, err := d.Buffer.Write(p)
+	if bytes.Contains(p, []byte(d.match)) {
+		d.cancel()
+	}
+	return n, err
+}
+
+func TestCLICancelDuringPostProcessing(t *testing.T) {
+	for _, match := range []string{"Rendering 0/", "Saving "} {
+		for _, format := range []string{"svg", "png"} {
+			t.Run(format+match, func(t *testing.T) {
+				dir := t.TempDir()
+				keep := filepath.Join(dir, "existing."+format)
+				if err := os.WriteFile(keep, []byte("keep"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				diagnostics := &cancelAtDiagnostic{match: match, cancel: cancel}
+				// io.StringWriterを避け、すべての診断をWriteで観測する。
+				type writer struct{ io.Writer }
+				code := runCLI(ctx, cliArgs([]string{"--format", format, "--output-dir", dir}, "long"), nil, io.Discard, writer{diagnostics})
+				entries, err := os.ReadDir(dir)
+				if code != 130 || err != nil || len(entries) != 1 || entries[0].Name() != filepath.Base(keep) || !strings.Contains(diagnostics.String(), "中断されました") {
+					t.Fatalf("code=%d entries=%v err=%v diagnostics=%s", code, entries, err, diagnostics.String())
+				}
+			})
+		}
 	}
 }

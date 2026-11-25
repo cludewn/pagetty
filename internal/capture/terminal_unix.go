@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"syscall"
+	"time"
 
 	"github.com/charmbracelet/x/xpty"
 	"github.com/muesli/cancelreader"
@@ -49,6 +50,20 @@ func afterStart(p xpty.Pty) error {
 	return p.(*xpty.UnixPty).Slave().Close()
 }
 
+func stopPTYInput(p xpty.Pty) error {
+	return p.(*xpty.UnixPty).Master().SetWriteDeadline(time.Now())
+}
+
+func stopPTYOutput(p xpty.Pty, _ io.ReadCloser) error { return closePTY(p) }
+
+func stopDescendants(pid int) error {
+	err := syscall.Kill(-pid, syscall.SIGKILL)
+	if errors.Is(err, syscall.ESRCH) {
+		return nil
+	}
+	return err
+}
+
 func afterWait(xpty.Pty) error { return nil }
 
 func closePTY(p xpty.Pty) error {
@@ -82,7 +97,7 @@ func wasInterrupted(state *os.ProcessState) bool {
 	}
 }
 
-func openInput(f *os.File) (*inputReader, error) {
+func openInput(f *os.File, _ bool) (*inputReader, error) {
 	info, err := f.Stat()
 	if err != nil {
 		return nil, err

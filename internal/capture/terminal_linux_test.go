@@ -174,7 +174,7 @@ func TestRunCtrlC(t *testing.T) {
 	out.wait(t, ctx, "ready")
 	_, _ = master.Write([]byte{3})
 	<-done
-	if runErr != nil || !result.Interrupted || !strings.Contains(strings.Join(rowTexts(result.Document), ""), "ready") {
+	if runErr != nil || !result.Interrupted || len(result.Document.Rows) != 0 {
 		t.Fatalf("result=%+v err=%v", result, runErr)
 	}
 }
@@ -204,7 +204,11 @@ func TestRunSignalExit(t *testing.T) {
 				t.Fatalf("started=%t exit=%d interrupted=%t, want started=true exit=-1 interrupted=%t",
 					result.Started, result.ExitCode, result.Interrupted, tc.interrupted)
 			}
-			if got := rowTexts(result.Document); !reflect.DeepEqual(got, []string{"before"}) {
+			if tc.interrupted {
+				if len(result.Document.Rows) != 0 {
+					t.Fatalf("interrupted document: %v", rowTexts(result.Document))
+				}
+			} else if got := rowTexts(result.Document); !reflect.DeepEqual(got, []string{"before"}) {
 				t.Fatalf("display=%q, want [before]", got)
 			}
 		})
@@ -349,5 +353,59 @@ func TestRunExternalQueryResponder(t *testing.T) {
 				t.Fatalf("exit=%d display=%q err=%v", result.ExitCode, rowTexts(result.Document), runErr)
 			}
 		})
+	}
+}
+
+func TestCancelDuringDrainRestoresInputAndDropsRecord(t *testing.T) {
+	master, slave, err := pty.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer master.Close()
+	defer slave.Close()
+	state, err := term.GetState(int(slave.Fd()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 9*time.Second)
+	defer cancel()
+	out := newObservedOutput()
+	type outcome struct {
+		result Result
+		err    error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		result, err := Run(ctx, childCommand("descendant"), Options{Columns: 40, Rows: 3, Input: slave, Output: out})
+		done <- outcome{result, err}
+	}()
+	out.wait(t, ctx, "parent")
+	for {
+		got, err := term.GetState(int(slave.Fd()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if reflect.DeepEqual(state, got) {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("input restoration waited for drain")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	select {
+	case result := <-done:
+		t.Fatalf("drain ended before cancellation: %+v", result)
+	default:
+	}
+	cancel()
+	select {
+	case got := <-done:
+		if !got.result.Interrupted || len(got.result.Document.Rows) != 0 || !errors.Is(got.err, context.Canceled) {
+			t.Fatalf("result=%+v err=%v", got.result, got.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("drain remained blocked after cancellation")
 	}
 }

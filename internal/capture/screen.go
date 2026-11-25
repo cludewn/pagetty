@@ -1,10 +1,10 @@
 package capture
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"image/color"
-	"math"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -20,10 +20,7 @@ type screen struct {
 }
 
 func newScreen(columns, rows int) *screen {
-	t := vt.NewEmulator(columns, rows)
-	// リングの既定上限で過去行を捨てない。内部の添字加算が溢れない余地も残す。
-	t.SetScrollbackMaxLines(math.MaxInt / 4)
-	return &screen{terminal: t}
+	return &screen{terminal: vt.NewEmulator(columns, rows)}
 }
 
 func (s *screen) Write(p []byte) (int, error) {
@@ -31,6 +28,11 @@ func (s *screen) Write(p []byte) (int, error) {
 }
 
 func (s *screen) document() (display.Document, error) {
+	doc, _, err := s.documentUntil(context.Background(), s.terminal.ScrollbackLen()+s.terminal.Height())
+	return doc, err
+}
+
+func (s *screen) documentUntil(ctx context.Context, limit int) (display.Document, bool, error) {
 	t := s.terminal
 	doc := display.Document{Columns: t.Width()}
 	var resultErr error
@@ -39,7 +41,10 @@ func (s *screen) document() (display.Document, error) {
 		doc.Rows = append(doc.Rows, row)
 		resultErr = errors.Join(resultErr, err)
 	}
-	for y := 0; y < t.ScrollbackLen(); y++ {
+	for y := 0; y < min(limit, t.ScrollbackLen()); y++ {
+		if err := ctx.Err(); err != nil {
+			return display.Document{}, false, err
+		}
 		line := t.ScrollbackLine(y)
 		appendRow(func(x int) *uv.Cell {
 			if x >= len(line) {
@@ -49,22 +54,34 @@ func (s *screen) document() (display.Document, error) {
 		})
 	}
 
+	if t.ScrollbackLen() > limit {
+		return doc, true, resultErr
+	}
+
 	// 最後の改行で移動しただけの空行と、起動時の未使用領域は加えない。
 	end := t.CursorPosition().Y
 	if t.CursorPosition().X > 0 || t.CursorPendingWrap() {
 		end++
 	}
-	rows := make([]display.Row, t.Height())
-	for y := range rows {
+	rows := make([]display.Row, min(limit-len(doc.Rows), t.Height()))
+	for y := range t.Height() {
+		if y >= len(rows) && end > len(rows) {
+			break
+		}
+		if err := ctx.Err(); err != nil {
+			return display.Document{}, false, err
+		}
 		row, err := displayRow(t.Width(), func(x int) *uv.Cell { return t.CellAt(x, y) })
-		rows[y] = row
-		resultErr = errors.Join(resultErr, err)
-		if len(row.Cells) > 0 {
+		if y < len(rows) {
+			rows[y] = row
+			resultErr = errors.Join(resultErr, err)
+		}
+		if len(row.Cells) > 0 || y >= len(rows) && err != nil {
 			end = max(end, y+1)
 		}
 	}
 	doc.Rows = append(doc.Rows, rows[:min(end, len(rows))]...)
-	return doc, resultErr
+	return doc, end > len(rows), resultErr
 }
 
 func displayRow(columns int, at func(int) *uv.Cell) (display.Row, error) {

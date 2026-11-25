@@ -2,6 +2,7 @@ package render
 
 import (
 	"bytes"
+	"context"
 	"image"
 	"image/png"
 	"math"
@@ -58,7 +59,7 @@ func TestPNGMatchesFullPageRasterizer(t *testing.T) {
 			if err := png.Encode(&want, reference); err != nil {
 				t.Fatal(err)
 			}
-			if err := encodePNG(&got, svg.Data, w, h); err != nil {
+			if err := encodePNG(context.Background(), &got, svg.Data, w, h); err != nil {
 				t.Fatal(err)
 			}
 			if !bytes.Equal(got.Bytes(), want.Bytes()) {

@@ -2,6 +2,7 @@ package render
 
 import (
 	"bytes"
+	"context"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -14,6 +15,19 @@ import (
 
 	"github.com/cludewn/pagetty/internal/display"
 )
+
+func Render(doc display.Document, opts Options) ([]Image, error) {
+	opts.PageLimit = MaxPages
+	var images []Image
+	_, err := RenderPages(context.Background(), doc, opts, func(img Image) error {
+		images = append(images, img)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return images, nil
+}
 
 func TestRenderCellPositions(t *testing.T) {
 	green := display.Style{Foreground: display.Color{Kind: display.ColorRGB, G: 255}}
@@ -262,8 +276,6 @@ func TestRenderErrors(t *testing.T) {
 		{"invalid format", numberedDocument(1), Options{MaxLines: 4, Format: "jpg"}},
 		{"row overflow", display.Document{Columns: 1, Rows: []display.Row{{Cells: []display.Cell{valid, valid}}}}, Options{MaxLines: 4}},
 		{"huge width", display.Document{Columns: int(^uint(0) >> 1), Rows: []display.Row{{}}}, Options{MaxLines: 4}},
-		{"huge height", display.Document{Columns: 1, Rows: make([]display.Row, 1200)}, Options{MaxLines: 1200}},
-		{"huge area", display.Document{Columns: 3000, Rows: make([]display.Row, 40)}, Options{MaxLines: 40}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			images, err := Render(tt.doc, tt.options)
@@ -282,12 +294,10 @@ func (failedWriter) Write([]byte) (int, error) { return 0, errWrite }
 
 func TestEncodeFailure(t *testing.T) {
 	c := Image{Width: 10, Height: 10, Data: []byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><rect width="10" height="10"/></svg>`)}
-	for _, format := range []Format{PNG, SVG} {
-		if err := encode(failedWriter{}, c, format); !errors.Is(err, errWrite) {
-			t.Errorf("%s encode error = %v, want write error", format, err)
-		}
+	if err := encodePNG(context.Background(), failedWriter{}, c.Data, c.Width, c.Height); !errors.Is(err, errWrite) {
+		t.Errorf("PNG encode error = %v, want write error", err)
 	}
-	if err := encodePNG(&bytes.Buffer{}, []byte("<svg><path"), 10, 10); err == nil {
+	if err := encodePNG(context.Background(), &bytes.Buffer{}, []byte("<svg><path"), 10, 10); err == nil {
 		t.Error("invalid SVG must fail conversion")
 	}
 	if _, err := loadFont([]byte("invalid font")); err == nil {

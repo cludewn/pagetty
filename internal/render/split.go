@@ -1,6 +1,7 @@
 package render
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/cludewn/pagetty/internal/display"
@@ -9,6 +10,10 @@ import (
 // Split は表示行を最大maxLines行のページへ分割する。返すスライスは読み取り専用。
 // 内容がなければページを返さず、空のRowは一行として保持する。
 func Split(doc display.Document, maxLines int) ([]display.Document, error) {
+	return split(context.Background(), doc, maxLines)
+}
+
+func split(ctx context.Context, doc display.Document, maxLines int) ([]display.Document, error) {
 	if maxLines <= 0 {
 		return nil, fmt.Errorf("max lines must be positive: %d", maxLines)
 	}
@@ -20,6 +25,9 @@ func Split(doc display.Document, maxLines int) ([]display.Document, error) {
 	lookback := min(3, maxLines/4)
 	var pages []display.Document
 	for start := 0; start < len(doc.Rows); {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		end := start + min(maxLines, len(doc.Rows)-start)
 		if end < len(doc.Rows) && !blank(doc.Rows[end-1]) {
 			for candidate := end - 1; candidate >= end-lookback; candidate-- {

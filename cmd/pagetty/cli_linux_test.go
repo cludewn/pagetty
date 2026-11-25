@@ -20,7 +20,7 @@ import (
 )
 
 func TestCLIUnixInteractionAndCtrlC(t *testing.T) {
-	for _, mode := range []string{"interactive", "ctrlc", "size"} {
+	for _, mode := range []string{"interactive", "ctrlc", "size", "raw-key", "catch-exit", "catch-twice", "ignore-repeat", "limit-input", "limit-interrupt"} {
 		t.Run(mode, func(t *testing.T) {
 			master, slave, err := pty.Open()
 			if err != nil {
@@ -43,12 +43,34 @@ func TestCLIUnixInteractionAndCtrlC(t *testing.T) {
 			} else if mode == "ctrlc" {
 				childMode, wantCode = "block", 130
 				out.responses = []consoleResponse{{"ready", "\x03"}}
+			} else if mode == "catch-exit" {
+				wantCode = 7
+				out.responses = []consoleResponse{{"ready", "\x03"}}
+			} else if mode == "catch-twice" {
+				wantCode = 7
+				out.responses = []consoleResponse{{"ready", "\x03"}, {"first interrupt handled", "\x03"}}
+			} else if mode == "raw-key" {
+				out.responses = []consoleResponse{{"ready", "\x03"}}
+			} else if mode == "ignore-repeat" {
+				out.responses = []consoleResponse{
+					{"ready", "\x03"}, {"first interrupt ignored", "\x03\x03"}, {"still running>", "continue\r"},
+				}
+			} else if mode == "limit-input" {
+				wantCode = 1
+				out.responses = []consoleResponse{{"post-limit>", "still interactive\r"}}
+			} else if mode == "limit-interrupt" {
+				wantCode = 130
+				out.responses = []consoleResponse{{"post-limit>", "\x03"}}
 			}
 			dir := t.TempDir()
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
 			var diagnostics bytes.Buffer
-			code := runCLI(ctx, cliArgs([]string{"--output-dir", dir}, childMode), slave, out, &diagnostics)
+			options := []string{"--output-dir", dir}
+			if strings.HasPrefix(mode, "limit-") {
+				options = append(options, "--max-lines", "1", "--page-limit", "2", "--format", "svg")
+			}
+			code := runCLI(ctx, cliArgs(options, childMode), slave, out, &diagnostics)
 			if code != wantCode || len(out.responses) != 0 {
 				t.Fatalf("code=%d output=%q diagnostics=%q", code, out.String(), diagnostics.String())
 			}
@@ -62,11 +84,35 @@ func TestCLIUnixInteractionAndCtrlC(t *testing.T) {
 			if mode == "size" && !strings.Contains(out.String(), "size:80:12:<nil>") {
 				t.Fatalf("host terminal rows not used: %q", out.String())
 			}
-			paths := imageFiles(t, dir, "png")
-			if len(paths) != 1 || (mode == "ctrlc" && !strings.Contains(paths[0], "-partial_001")) {
+			extension, expected := "png", 1
+			if wantCode == 130 {
+				expected = 0
+			}
+			if strings.HasPrefix(mode, "limit-") {
+				extension = "svg"
+			}
+			if mode == "limit-input" {
+				expected = 2
+				if !strings.Contains(out.String(), "received:still interactive") {
+					t.Fatalf("input after limit lost: %q", out.String())
+				}
+			}
+			if mode == "raw-key" && !strings.Contains(out.String(), "raw key received") {
+				t.Fatalf("raw key lost: %q", out.String())
+			}
+			if mode == "catch-twice" && !strings.Contains(out.String(), "second interrupt handled") {
+				t.Fatalf("second key was not forwarded: %q", out.String())
+			}
+			if mode == "ignore-repeat" && !strings.Contains(out.String(), "continued after interrupts") {
+				t.Fatalf("target did not continue after repeated input: %q", out.String())
+			}
+			paths := imageFiles(t, dir, extension)
+			if len(paths) != expected {
 				t.Fatalf("paths=%v diagnostics=%q", paths, diagnostics.String())
 			}
-			readImage(t, paths[0])
+			for _, path := range paths {
+				readImage(t, path)
+			}
 		})
 	}
 }
@@ -106,7 +152,7 @@ func TestCLIUnixProcessSignals(t *testing.T) {
 				wantCode, wantPages = 1, 2
 			} else if mode == "Ctrl+C" {
 				script += "; read token"
-				wantCode = 130
+				wantCode, wantPages = 130, 0
 			}
 			args = append(args, script)
 			var gate *os.File
@@ -198,7 +244,7 @@ func TestCLIUnixProcessSignals(t *testing.T) {
 			}
 			for _, path := range paths {
 				readImage(t, path)
-				if (mode == "closed stdout" || mode == "Ctrl+C") && !strings.Contains(path, "-partial_") {
+				if mode == "closed stdout" && !strings.Contains(path, "-partial_") {
 					t.Fatalf("partial image not marked: %s", path)
 				}
 			}
@@ -220,6 +266,44 @@ func TestCLIUnixProcessSignals(t *testing.T) {
 					t.Fatalf("interruption not reported: %q", diagnostics.String())
 				}
 			}
+		})
+	}
+}
+
+func TestCLIUnixPageConfirmation(t *testing.T) {
+	for _, tc := range pagePromptCases {
+		t.Run(tc.mode, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+			defer cancel()
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "existing.png"), []byte("keep"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			exe, err := os.Executable()
+			if err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.CommandContext(ctx, exe, "-test.run=^TestCLIPagePromptProcess$", "--", "pagetty-page-prompt", tc.mode, dir)
+			master, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: 100, Rows: 24})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer master.Close()
+			out := &consoleResponder{input: master, responses: tc.responses("\x04")}
+			done := make(chan error, 1)
+			go func() { _, err := io.Copy(out, master); done <- err }()
+			if err := cmd.Wait(); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case err := <-done:
+				if err != nil && !errors.Is(err, syscall.EIO) {
+					t.Fatal(err)
+				}
+			case <-ctx.Done():
+				t.Fatal(ctx.Err())
+			}
+			tc.check(t, dir, out)
 		})
 	}
 }
