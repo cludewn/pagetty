@@ -38,6 +38,9 @@ func TestCLIWindowsConsoleChild(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	options := []string{"--output-dir", dir}
+	if strings.HasPrefix(mode, "catch-") || mode == "ignore-repeat" {
+		options = append(options, "-s")
+	}
 	if strings.HasPrefix(mode, "limit-") {
 		options = append(options, "--max-lines", "1", "--page-limit", "2", "--format", "svg")
 	}
@@ -178,6 +181,9 @@ func TestCLIWindowsInteractionAndCtrlC(t *testing.T) {
 			}
 			for _, path := range paths {
 				readImage(t, path)
+				if (strings.HasPrefix(mode, "catch-") || mode == "ignore-repeat") && strings.Contains(path, "-partial_") {
+					t.Fatalf("ordinary exit marked partial: %s", path)
+				}
 			}
 		})
 	}
@@ -190,4 +196,9 @@ func ignoreTestInterrupt() error {
 		return err
 	}
 	return nil
+}
+
+func interruptTestChild() {
+	code := uint32(windows.STATUS_CONTROL_C_EXIT)
+	os.Exit(int(code))
 }

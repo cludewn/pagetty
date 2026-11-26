@@ -229,9 +229,46 @@ func TestRunCancelDiscardsOutput(t *testing.T) {
 	out.wait(t, ctx, "ready")
 	cancel()
 	got := <-done
-	if !errors.Is(got.err, context.Canceled) || !got.result.Started || !got.result.Interrupted ||
+	if !errors.Is(got.err, context.Canceled) || !got.result.Started || !got.result.Canceled || got.result.Interrupted ||
 		len(got.result.Document.Rows) != 0 {
 		t.Fatalf("result=%+v err=%v", got.result, got.err)
+	}
+}
+
+type inputWriteFunc func([]byte) (int, error)
+
+func (f inputWriteFunc) Write(data []byte) (int, error) { return f(data) }
+
+func TestTerminalInputForwarderAtCommandExit(t *testing.T) {
+	for _, tc := range []struct {
+		name                     string
+		ended, cancel, forwarded bool
+		data                     string
+		written                  int
+		writeErr                 error
+	}{
+		{"late control input", true, true, false, "\x03", 0, nil},
+		{"late ordinary input", true, false, false, "a", 0, nil},
+		{"interrupt forwarded", false, false, true, "\x03", 1, nil},
+		{"undelivered interrupt", false, true, true, "a\x03", 1, os.ErrClosed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var ended atomic.Bool
+			ended.Store(tc.ended)
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			forwarded := false
+			target := inputWriteFunc(func(data []byte) (int, error) {
+				forwarded = true
+				ended.Store(true)
+				return tc.written, tc.writeErr
+			})
+			w := terminalInputForwarder{target, &ended, cancel}
+			_, err := w.Write([]byte(tc.data))
+			if forwarded != tc.forwarded || (ctx.Err() != nil) != tc.cancel || !errors.Is(err, tc.writeErr) {
+				t.Fatalf("forwarded=%t ctx=%v err=%v", forwarded, ctx.Err(), err)
+			}
+		})
 	}
 }
 
@@ -334,7 +371,7 @@ func TestRunStalledOutput(t *testing.T) {
 				if got.err == nil || !got.result.Started || writer.closed.Load() || hasRecord == (mode == "cancel") {
 					t.Fatalf("started=%t closed=%t display=%q err=%v", got.result.Started, writer.closed.Load(), rowTexts(got.result.Document), got.err)
 				}
-				if mode == "cancel" && (!errors.Is(got.err, context.Canceled) || !got.result.Interrupted) {
+				if mode == "cancel" && (!errors.Is(got.err, context.Canceled) || !got.result.Canceled) {
 					t.Fatalf("cancel result=%+v err=%v", got.result, got.err)
 				}
 			case <-time.After(limit):

@@ -37,6 +37,8 @@ func runCLI(ctx context.Context, args []string, input *os.File, output, stderr i
 	maxLines := flags.Int("max-lines", 44, "画像1枚あたりの最大表示行数 (正の整数)")
 	pageLimit := flags.Int("page-limit", render.DefaultPageLimit, "画像の保存範囲を確認する枚数 (1〜64)")
 	outputDir := flags.String("output-dir", "./captures/", "起動元を基準とした画像保存先")
+	saveOnInterrupt := flags.Bool("save-on-interrupt", false, "対象が割り込みで終了した場合も部分記録を保存する")
+	flags.BoolVar(saveOnInterrupt, "s", false, "--save-on-interrupt の短縮名")
 	printHelp := func() {
 		flags.SetOutput(output)
 		fmt.Fprint(flags.Output(), usage)
@@ -63,7 +65,8 @@ a は保存可能な全ページ、l は設定上限までを保存します。n
 端末制御で履歴の先頭が上書きされた場合は、欠落を通知します。
 実際に省略が生じた場合や記録エラー時は、partial付きの部分記録の保存を試みます。
 Ctrl+Cは対象へ転送します。対象が割り込みを捕捉・無視して実行を続ける場合は、PageTTYも実行を続けます。
-Ctrl+Cによる中断では、対象終了後の確認・生成・保存中も今回の画像を破棄します。
+対象が割り込みで終了した場合、既定では画像を保存しません。--save-on-interrupt (-s) を指定すると -partial 付きで保存します。
+対象終了後の出力回収・記録変換・保存確認・画像生成・保存中にCtrl+Cを押すと、今回の画像を破棄します。
 終了コード: 通常は対象のコード、資源制限・非対話時の打ち切り・ツール側失敗1、引数不正2、中断130。
 利用者が保存を辞退したり、設定上限までを選んだりしただけでは終了コードは変わりません。`)
 	}
@@ -109,6 +112,7 @@ Ctrl+Cによる中断では、対象終了後の確認・生成・保存中も�
 	var limitNotice <-chan diagnosticResult
 	result, captureErr := capture.Run(ctx, args[separator+1:], capture.Options{
 		Columns: *columns, Rows: rows, Input: input, Output: output,
+		SaveOnInterrupt: *saveOnInterrupt,
 		OnRecordLimit: func(reason string, running bool) {
 			if running {
 				limitNotice = diagnostics.notice(fmt.Sprintf("\npagetty: 記録を打ち切りました（%s）。対象プログラムの実行と入出力は継続します。\n", reason))
@@ -120,18 +124,23 @@ Ctrl+Cによる中断では、対象終了後の確認・生成・保存中も�
 	if err := withoutCancellation(captureErr); err != nil {
 		fmt.Fprintf(diagnostics, "pagetty: PTY実行・記録失敗: %v\n", err)
 	}
-	if result.Interrupted || ctx.Err() != nil {
+	if result.Canceled || ctx.Err() != nil || (result.Interrupted && !*saveOnInterrupt) {
 		return interrupted(diagnostics)
 	}
 	if !result.Started {
 		return 1
 	}
-	code := result.ExitCode
+	targetCode := result.ExitCode
+	if result.Interrupted {
+		targetCode = 130
+		fmt.Fprintln(diagnostics, "pagetty: 対象プログラムが割り込みで終了しました。")
+	}
+	code := targetCode
 	switch {
 	case code < 0:
 		fmt.Fprintln(diagnostics, "pagetty: 対象プログラムの終了失敗: 終了コードを取得できません（シグナル終了など）")
 		code = 1
-	case code != 0:
+	case code != 0 && !result.Interrupted:
 		fmt.Fprintf(diagnostics, "pagetty: 対象プログラムの終了失敗: 終了コード %d\n", code)
 	}
 	partial := captureErr != nil || result.Limit != ""
@@ -147,9 +156,9 @@ Ctrl+Cによる中断では、対象終了後の確認・生成・保存中も�
 		default:
 		}
 		if notified {
-			fmt.Fprintf(diagnostics, "pagetty: 対象の終了コード %d\n", result.ExitCode)
+			fmt.Fprintf(diagnostics, "pagetty: 対象の終了コード %d\n", targetCode)
 		} else {
-			fmt.Fprintf(diagnostics, "pagetty: 記録を打ち切りました（%s、対象の終了コード %d）\n", result.Limit, result.ExitCode)
+			fmt.Fprintf(diagnostics, "pagetty: 記録を打ち切りました（%s、対象の終了コード %d）\n", result.Limit, targetCode)
 		}
 	}
 	if len(result.Document.Rows) == 0 {
@@ -195,8 +204,9 @@ Ctrl+Cによる中断では、対象終了後の確認・生成・保存中も�
 	}
 	if limit != "" {
 		partial, code = true, 1
-		fmt.Fprintf(diagnostics, "pagetty: 画像生成を打ち切りました（%s、対象の終了コード %d）\n", limit, result.ExitCode)
+		fmt.Fprintf(diagnostics, "pagetty: 画像生成を打ち切りました（%s、対象の終了コード %d）\n", limit, targetCode)
 	}
+	partial = partial || result.Interrupted
 	if ctx.Err() == nil && renderErr == nil && saveErr == nil && len(save.staged) > 0 {
 		fmt.Fprintf(diagnostics, "pagetty: Saving %d %s...\n", len(save.staged), pageWord(len(save.staged)))
 		saveErr = save.publish(ctx, started.Format("20060102-150405"), partial)
