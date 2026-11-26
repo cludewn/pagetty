@@ -222,9 +222,11 @@ func TestCLISaveFailureDiscardsRun(t *testing.T) {
 	for _, phase := range []struct {
 		name, trigger string
 		blockSecond   bool
+		interrupted   bool
 	}{
-		{"second page staging", "Rendering 1/2", true},
-		{"second page publication", "Saving 2 pages", false},
+		{"second page staging", "Rendering 1/2", true, false},
+		{"second page publication", "Saving 2 pages", false, false},
+		{"second page publication on interrupt", "Saving 2 pages", false, true},
 	} {
 		t.Run(phase.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -251,7 +253,13 @@ func TestCLISaveFailureDiscardsRun(t *testing.T) {
 					return os.Remove(second)
 				},
 			}
-			args := cliArgs([]string{"--format", "svg", "--max-lines", "1", "--output-dir", dir}, "count", "2")
+			options := []string{"--format", "svg", "--max-lines", "1", "--output-dir", dir}
+			childMode := "count"
+			if phase.interrupted {
+				options = append(options, "-s")
+				childMode = "count-interrupt"
+			}
+			args := cliArgs(options, childMode, "2")
 			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 			defer cancel()
 			code := runCLI(ctx, args, nil, &bytes.Buffer{}, diagnostics)

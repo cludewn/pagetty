@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"reflect"
 	"strings"
 	"testing"
@@ -83,8 +84,30 @@ func TestWindowsConsoleChild(t *testing.T) {
 			case <-ctx.Done():
 			}
 		}()
+	case "interrupted drain":
+		var stop func()
+		ctx, stop = signal.NotifyContext(ctx, os.Interrupt)
+		defer stop()
+		stalled = newStalledOutput("ready")
+		command, output = childCommand("block"), stalled
+		go func() {
+			select {
+			case <-stalled.entered:
+			case <-ctx.Done():
+				return
+			}
+			fmt.Fprintln(os.Stdout, "ready")
+			for ctx.Err() == nil {
+				state, err := term.GetState(int(os.Stdin.Fd()))
+				if err == nil && reflect.DeepEqual(before, state) {
+					fmt.Fprintln(os.Stdout, "input restored")
+					return
+				}
+				time.Sleep(time.Millisecond)
+			}
+		}()
 	}
-	result, runErr := Run(ctx, command, Options{Columns: 40, Rows: 4, Input: os.Stdin, Output: output})
+	result, runErr := Run(ctx, command, Options{Columns: 40, Rows: 4, Input: os.Stdin, Output: output, SaveOnInterrupt: mode == "interrupted drain"})
 	after, stateErr := term.GetState(int(os.Stdin.Fd()))
 	afterCP, cpErr := windows.GetConsoleCP()
 	var afterOutputMode uint32
@@ -96,13 +119,13 @@ func TestWindowsConsoleChild(t *testing.T) {
 		<-stalled.finished
 		restored = restored && !stalled.closed.Load()
 	}
-	fmt.Printf("\nRESULT:%t:%d:%t:restored=%t:error=%t\n", result.Started, result.ExitCode, result.Interrupted, restored, runErr != nil)
+	fmt.Printf("\nRESULT:%t:%d:%t:restored=%t:error=%t:canceled=%t\n", result.Started, result.ExitCode, result.Interrupted, restored, runErr != nil, result.Canceled)
 	fmt.Printf("RECORD:%s\n", strings.Join(rowTexts(result.Document), "|"))
 	os.Exit(0)
 }
 
 func TestWindowsConsoleInputAndRestore(t *testing.T) {
-	for _, mode := range []string{"interactive", "wrapped output", "ctrlc", "nonzero", "missing", "stalled output"} {
+	for _, mode := range []string{"interactive", "wrapped output", "ctrlc", "nonzero", "missing", "stalled output", "interrupted drain"} {
 		t.Run(mode, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
@@ -133,9 +156,17 @@ func TestWindowsConsoleInputAndRestore(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
-			case "ctrlc":
+			case "ctrlc", "interrupted drain":
 				out.wait(t, ctx, "ready")
-				_, _ = p.Write([]byte{3})
+				if _, err := p.Write([]byte{3}); err != nil {
+					t.Fatal(err)
+				}
+				if mode == "interrupted drain" {
+					out.wait(t, ctx, "input restored")
+					if _, err := p.Write([]byte{3}); err != nil {
+						t.Fatal(err)
+					}
+				}
 			}
 			if err := xpty.WaitProcess(ctx, cmd); err != nil {
 				t.Fatal(err)
@@ -177,8 +208,12 @@ func TestWindowsConsoleInputAndRestore(t *testing.T) {
 					t.Fatalf("start failure result: %q", text)
 				}
 			case "stalled output":
-				if !strings.Contains(text, ":true:restored=true:error=true") || strings.Contains(text, "RECORD:ready") {
+				if !strings.Contains(text, ":false:restored=true:error=true:canceled=true") || strings.Contains(text, "RECORD:ready") {
 					t.Fatalf("stalled output result: %q", text)
+				}
+			case "interrupted drain":
+				if !strings.Contains(text, ":true:restored=true:error=true:canceled=true") || strings.Contains(text, "RECORD:ready") {
+					t.Fatalf("interrupted drain result: %q", text)
 				}
 			}
 		})

@@ -65,10 +65,17 @@ func TestCLIChild(t *testing.T) {
 			}
 		case "missing-glyph":
 			fmt.Print("A日éＡ\x1b[31;1m🚀\x1b[0mZ")
-		case "count":
+		case "count", "count-interrupt", "count-block":
 			count, _ := strconv.Atoi(os.Args[i+2])
 			for n := range count {
 				fmt.Printf("line%d\n", n)
+			}
+			if os.Args[i+1] == "count-interrupt" {
+				interruptTestChild()
+			}
+			if os.Args[i+1] == "count-block" {
+				fmt.Print("ready")
+				time.Sleep(time.Minute)
 			}
 			if i+3 < len(os.Args) {
 				code, _ := strconv.Atoi(os.Args[i+3])
@@ -183,6 +190,7 @@ func TestCLIHelpAndInvalidArguments(t *testing.T) {
 		code, output, diagnostics := runTestCLI(t, args)
 		if code != 0 || strings.Contains(output, "pagetty capture") || !strings.Contains(output, "pagetty [options] -- <command> [args...]") || !strings.Contains(output, "--format svg") ||
 			!strings.Contains(output, "page-limit") || strings.Contains(output, "max-pages") ||
+			!strings.Contains(output, "--save-on-interrupt (-s)") ||
 			!strings.Contains(output, "a は保存可能な全ページ、l は設定上限までを保存します。n・Enter・EOFは保存しません。") || diagnostics != "" {
 			t.Fatalf("args=%q code=%d output=%q diagnostics=%q", args, code, output, diagnostics)
 		}
@@ -675,6 +683,43 @@ func TestCLIPageLimitNonInteractive(t *testing.T) {
 	}
 }
 
+func TestCLISaveOnInterrupt(t *testing.T) {
+	for _, tc := range []struct {
+		name, mode, lines, childCode string
+		flags                        []string
+		code, pages                  int
+		partial                      bool
+	}{
+		{"default", "count-interrupt", "2", "", nil, 130, 0, false},
+		{"long", "count-interrupt", "2", "", []string{"--save-on-interrupt"}, 130, 2, true},
+		{"short", "count-interrupt", "2", "", []string{"-s"}, 130, 2, true},
+		{"disabled", "count-interrupt", "2", "", []string{"--save-on-interrupt", "-s=false"}, 130, 0, false},
+		{"enabled", "count-interrupt", "2", "", []string{"-s=false", "--save-on-interrupt=true"}, 130, 2, true},
+		{"empty", "count-interrupt", "0", "", []string{"-s"}, 130, 0, false},
+		{"page limit", "count-interrupt", "3", "", []string{"-s"}, 1, 2, true},
+		{"record limit", "count-interrupt", "1800", "", []string{"-s"}, 1, 2, true},
+		{"normal", "count", "2", "0", []string{"-s"}, 0, 2, false},
+		{"nonzero", "count", "2", "7", []string{"-s"}, 7, 2, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			options := append([]string{"--format", "svg", "--max-lines", "1", "--page-limit", "2", "--output-dir", dir}, tc.flags...)
+			code, _, diagnostics := runTestCLI(t, cliArgs(options, tc.mode, tc.lines, tc.childCode))
+			paths := imageFiles(t, dir, "svg")
+			if code != tc.code || len(paths) != tc.pages || strings.Contains(diagnostics, "記録を打ち切りました") != (tc.name == "record limit") ||
+				strings.Contains(diagnostics, "画像生成を打ち切りました") != (tc.code == 1) {
+				t.Fatalf("code=%d images=%v diagnostics=%q", code, paths, diagnostics)
+			}
+			for _, path := range paths {
+				if strings.Contains(path, "-partial_") != tc.partial {
+					t.Fatalf("unexpected image name: %s", path)
+				}
+				readImage(t, path)
+			}
+		})
+	}
+}
+
 type cancelAtDiagnostic struct {
 	bytes.Buffer
 	match  string
@@ -691,10 +736,10 @@ func (d *cancelAtDiagnostic) Write(p []byte) (int, error) {
 
 func TestCLICancelDuringPostProcessing(t *testing.T) {
 	for _, match := range []string{"Rendering 0/", "Saving "} {
-		for _, format := range []string{"svg", "png"} {
-			t.Run(format+match, func(t *testing.T) {
+		for _, tc := range []struct{ format, mode, count string }{{"svg", "long", ""}, {"png", "long", ""}, {"svg", "count-interrupt", "5"}, {"png", "count-interrupt", "5"}} {
+			t.Run(tc.format+tc.mode+match, func(t *testing.T) {
 				dir := t.TempDir()
-				keep := filepath.Join(dir, "existing."+format)
+				keep := filepath.Join(dir, "existing."+tc.format)
 				if err := os.WriteFile(keep, []byte("keep"), 0600); err != nil {
 					t.Fatal(err)
 				}
@@ -703,9 +748,13 @@ func TestCLICancelDuringPostProcessing(t *testing.T) {
 				diagnostics := &cancelAtDiagnostic{match: match, cancel: cancel}
 				// io.StringWriterを避け、すべての診断をWriteで観測する。
 				type writer struct{ io.Writer }
-				code := runCLI(ctx, cliArgs([]string{"--format", format, "--output-dir", dir}, "long"), nil, io.Discard, writer{diagnostics})
+				options := []string{"--format", tc.format, "--output-dir", dir}
+				if tc.mode == "count-interrupt" {
+					options = append(options, "-s")
+				}
+				code := runCLI(ctx, cliArgs(options, tc.mode, tc.count), nil, io.Discard, writer{diagnostics})
 				entries, err := os.ReadDir(dir)
-				if code != 130 || err != nil || len(entries) != 1 || entries[0].Name() != filepath.Base(keep) || !strings.Contains(diagnostics.String(), "中断されました") {
+				if code != 130 || ctx.Err() == nil || err != nil || len(entries) != 1 || entries[0].Name() != filepath.Base(keep) || !strings.Contains(diagnostics.String(), "中断されました") {
 					t.Fatalf("code=%d entries=%v err=%v diagnostics=%s", code, entries, err, diagnostics.String())
 				}
 			})

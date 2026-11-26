@@ -30,9 +30,16 @@ var pagePromptCases = []pagePromptCase{
 	{"page-interrupt", "3", "2", "\x03", 130, 0, false},
 	{"page-hard", "65", "64", "a\r", 7, 0, false},
 	{"page-missing", "1650", "2", "n\r", 1, 0, true},
+	{"page-partial-all", "2", "2", "a\r", 130, 3, true},
+	{"page-partial-limit", "2", "2", "l\r", 130, 2, true},
+	{"page-partial-none", "2", "2", "n\r", 130, 0, false},
+	{"page-partial-interrupt", "2", "2", "\x03", 130, 0, false},
 }
 
 func (tc pagePromptCase) responses(eof string) []consoleResponse {
+	if strings.HasPrefix(tc.mode, "page-partial-") {
+		return []consoleResponse{{"ready", "\x03"}, {"選択 [a/l/N]:", tc.answer}}
+	}
 	switch tc.mode {
 	case "page-equal":
 		return nil
@@ -53,6 +60,10 @@ func (tc pagePromptCase) check(t *testing.T, dir string, out *consoleResponder) 
 	if len(out.responses) != 0 || !strings.Contains(output, fmt.Sprintf("CLI_RESULT:%d:restored=true", tc.code)) {
 		t.Fatalf("unconsumed responses=%d output=%q", len(out.responses), output)
 	}
+	wantCanceled := tc.mode == "page-interrupt" || tc.mode == "page-partial-interrupt"
+	if strings.Contains(output, "中断されました") != wantCanceled {
+		t.Fatalf("cancellation not distinguished from declining: %q", output)
+	}
 	prompt := strings.Index(output, "選択 [")
 	rendering := strings.Index(output, "Rendering")
 	if (prompt == -1) != (tc.mode == "page-equal") || (rendering == -1) != (tc.pages == 0) ||
@@ -63,7 +74,7 @@ func (tc pagePromptCase) check(t *testing.T, dir string, out *consoleResponder) 
 		t.Fatalf("missing capacity notice: %q", output)
 	}
 	if tc.mode == "page-hard" && (!strings.Contains(output, "先頭の64枚") || strings.Contains(output, "[a]")) ||
-		tc.mode == "page-missing" && !strings.Contains(output, "記録に欠落がある") {
+		strings.Contains(output, "記録に欠落がある") != (tc.mode == "page-missing") {
 		t.Fatalf("inaccurate confirmation: %q", output)
 	}
 	paths := imageFiles(t, dir, "svg")
@@ -98,7 +109,12 @@ func TestCLIPagePromptProcess(t *testing.T) {
 		// 製品と同様に、テストプロセスが終了するまで購読を維持する。
 		ctx, _ := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		opts := []string{"--format", "svg", "--max-lines", "1", "--page-limit", tc.limit, "--output-dir", dir}
-		code := runCLI(ctx, cliArgs(opts, "count", tc.total, "7"), os.Stdin, os.Stdout, os.Stderr)
+		childMode := "count"
+		if strings.HasPrefix(mode, "page-partial-") {
+			opts = append(opts, "-s")
+			childMode = "count-block"
+		}
+		code := runCLI(ctx, cliArgs(opts, childMode, tc.total, "7"), os.Stdin, os.Stdout, os.Stderr)
 		after, err := term.GetState(int(os.Stdin.Fd()))
 		fmt.Printf("\nCLI_RESULT:%d:restored=%t\n", code, err == nil && reflect.DeepEqual(before, after))
 		return

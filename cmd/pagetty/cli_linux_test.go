@@ -67,6 +67,9 @@ func TestCLIUnixInteractionAndCtrlC(t *testing.T) {
 			defer cancel()
 			var diagnostics bytes.Buffer
 			options := []string{"--output-dir", dir}
+			if strings.HasPrefix(mode, "catch-") || mode == "ignore-repeat" || mode == "raw-key" {
+				options = append(options, "-s")
+			}
 			if strings.HasPrefix(mode, "limit-") {
 				options = append(options, "--max-lines", "1", "--page-limit", "2", "--format", "svg")
 			}
@@ -112,6 +115,9 @@ func TestCLIUnixInteractionAndCtrlC(t *testing.T) {
 			}
 			for _, path := range paths {
 				readImage(t, path)
+				if (strings.HasPrefix(mode, "catch-") || mode == "ignore-repeat" || mode == "raw-key") && strings.Contains(path, "-partial_") {
+					t.Fatalf("ordinary exit marked partial: %s", path)
+				}
 			}
 		})
 	}

@@ -402,7 +402,68 @@ func TestCancelDuringDrainRestoresInputAndDropsRecord(t *testing.T) {
 	cancel()
 	select {
 	case got := <-done:
-		if !got.result.Interrupted || len(got.result.Document.Rows) != 0 || !errors.Is(got.err, context.Canceled) {
+		if !got.result.Canceled || got.result.Interrupted || len(got.result.Document.Rows) != 0 || !errors.Is(got.err, context.Canceled) {
+			t.Fatalf("result=%+v err=%v", got.result, got.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("drain remained blocked after cancellation")
+	}
+}
+
+func TestCancelDuringInterruptedDrain(t *testing.T) {
+	master, slave, err := pty.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer master.Close()
+	defer slave.Close()
+	state, err := term.GetState(int(slave.Fd()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	writer := newStalledOutput("ready")
+	defer close(writer.release)
+	type outcome struct {
+		result Result
+		err    error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		result, err := Run(ctx, childCommand("block"), Options{
+			Columns: 40, Rows: 3, Input: slave, Output: writer, SaveOnInterrupt: true,
+		})
+		done <- outcome{result, err}
+	}()
+	select {
+	case <-writer.entered:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	if _, err := master.Write([]byte{3}); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		got, err := term.GetState(int(slave.Fd()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if reflect.DeepEqual(got, state) {
+			break
+		}
+		select {
+		case got := <-done:
+			t.Fatalf("drain ended before cancellation: %+v", got)
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		case <-time.After(time.Millisecond):
+		}
+	}
+	cancel()
+	select {
+	case got := <-done:
+		if !got.result.Interrupted || !got.result.Canceled || len(got.result.Document.Rows) != 0 || !errors.Is(got.err, context.Canceled) {
 			t.Fatalf("result=%+v err=%v", got.result, got.err)
 		}
 	case <-time.After(2 * time.Second):

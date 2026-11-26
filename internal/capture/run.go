@@ -27,17 +27,19 @@ import (
 // 非端末Writerでは仮想端末が応答する。
 // 端末出力で端末のInputがない場合、問い合わせは応答を転送できないためエラーにする。
 type Options struct {
-	Columns       int
-	Rows          int
-	Input         *os.File
-	Output        io.Writer
-	OnRecordLimit func(reason string, running bool) // 書き込みを待たずに通知を受け取る。
+	Columns         int
+	Rows            int
+	Input           *os.File
+	Output          io.Writer
+	SaveOnInterrupt bool
+	OnRecordLimit   func(reason string, running bool) // 書き込みを待たずに通知を受け取る。
 }
 
-// Result は中断を除き、記録エラー時にも取得済みのDocumentを保持する。
+// Result は記録エラー時にも取得済みのDocumentを保持する。
 // 起動失敗はStarted=false、終了状態が得られなければExitCode=-1となる。
 // 対象の非0終了だけではRunのエラーにしない。
-// Interrupted は中断シグナルによる終了、または呼び出し元コンテキストの中断を示す。
+// Interruptedは対象の割り込み終了、Canceledは記録処理自体の中断を示す。
+// Canceledの場合、または割り込み終了時の保存が無効な場合はDocumentを破棄する。
 type Result struct {
 	Document display.Document
 	// CommandEndedAt は終了待ちを終え、残りの出力を回収する前の時刻。
@@ -45,6 +47,7 @@ type Result struct {
 	Started        bool
 	ExitCode       int
 	Interrupted    bool
+	Canceled       bool
 	Limit          string
 }
 
@@ -65,9 +68,8 @@ func Run(ctx context.Context, command []string, options Options) (result Result,
 	if options.Output == nil {
 		options.Output = os.Stdout
 	}
-	parent := ctx
-	ctx, interrupt := context.WithCancel(parent)
-	defer interrupt()
+	ctx, cancelCapture := context.WithCancel(ctx)
+	defer cancelCapture()
 	runCtx, stopCommand := context.WithCancel(ctx)
 	defer stopCommand()
 	outputCtx, stopOutput := context.WithCancel(ctx)
@@ -158,8 +160,12 @@ func Run(ctx context.Context, command []string, options Options) (result Result,
 	var inputDone chan error
 	if input != nil {
 		inputDone = make(chan error, 1)
+		var target io.Writer = p
+		if terminalInput {
+			target = terminalInputForwarder{p, &ended, cancelCapture}
+		}
 		go func(done chan<- error) {
-			_, err := io.Copy(p, input.reader)
+			_, err := io.Copy(target, input.reader)
 			if err != nil && !inputCanceled(err) && !(ended.Load() && (terminalEOF(err) || errors.Is(err, os.ErrDeadlineExceeded))) {
 				stopCommand()
 				done <- fmt.Errorf("入力転送に失敗しました: %w", err)
@@ -172,19 +178,26 @@ func Run(ctx context.Context, command []string, options Options) (result Result,
 	waitErr := xpty.WaitProcess(runCtx, cmd)
 	ended.Store(true)
 	result.CommandEndedAt = time.Now()
-	if cmd.ProcessState != nil {
-		result.ExitCode = cmd.ProcessState.ExitCode()
-		if wasInterrupted(cmd.ProcessState) {
-			result.Interrupted = true
-			interrupt()
-		}
-	}
 	if input != nil {
 		resultErr = errors.Join(resultErr, restoreInput())
 		restoreInput = func() error { return nil }
 		input.cancel()
 	}
+	if cmd.ProcessState != nil {
+		result.ExitCode = cmd.ProcessState.ExitCode()
+		result.Interrupted = wasInterrupted(cmd.ProcessState)
+	}
+	discard := result.Interrupted && !options.SaveOnInterrupt
+	if discard {
+		stopOutput()
+	}
 	resultErr = errors.Join(resultErr, stopPTYInput(p))
+	if result.Interrupted {
+		resultErr = errors.Join(resultErr, stopDescendants(cmd.Process.Pid))
+	}
+	if discard {
+		resultErr = errors.Join(resultErr, stopPTYOutput(p, reader))
+	}
 
 	// WindowsのConPTYはクローズ時にも最後の画面を出力する。
 	finished := make(chan error, 1)
@@ -192,7 +205,10 @@ func Run(ctx context.Context, command []string, options Options) (result Result,
 	timeout := time.NewTimer(5 * time.Second)
 	defer timeout.Stop()
 	deadline, canceled := timeout.C, ctx.Done()
-	stopped := false
+	if discard {
+		deadline = nil
+	}
+	stopped := result.Interrupted
 	for outputDone != nil || finished != nil || inputDone != nil {
 		select {
 		case err := <-outputDone:
@@ -211,9 +227,11 @@ func Run(ctx context.Context, command []string, options Options) (result Result,
 			resultErr = errors.Join(resultErr, stopPTYOutput(p, reader))
 			deadline = nil
 		case <-canceled:
-			stopped = true
-			resultErr = errors.Join(resultErr, stopDescendants(cmd.Process.Pid))
-			if outputDone != nil || finished != nil {
+			if !stopped {
+				stopped = true
+				resultErr = errors.Join(resultErr, stopDescendants(cmd.Process.Pid))
+			}
+			if !discard && (outputDone != nil || finished != nil) {
 				resultErr = errors.Join(resultErr, stopPTYOutput(p, reader))
 			}
 			canceled, deadline = nil, nil
@@ -224,19 +242,42 @@ func Run(ctx context.Context, command []string, options Options) (result Result,
 		if !stopped {
 			resultErr = errors.Join(resultErr, stopDescendants(cmd.Process.Pid))
 		}
-		if result.Interrupted && parent.Err() == nil {
-			return result, resultErr
-		}
-		result.Interrupted = true
+		result.Canceled = true
 		return result, errors.Join(resultErr, ctx.Err())
+	}
+	if discard {
+		return result, resultErr
 	}
 	result.Document, err = record.document(ctx)
 	result.Limit = record.limited
 	if ctx.Err() != nil {
-		result.Interrupted = true
+		result.Canceled = true
 		result.Document = display.Document{}
 	}
 	return result, errors.Join(resultErr, err)
+}
+
+type terminalInputForwarder struct {
+	target io.Writer
+	ended  *atomic.Bool
+	cancel context.CancelFunc
+}
+
+func (w terminalInputForwarder) Write(data []byte) (n int, err error) {
+	if !w.ended.Load() {
+		n, err = w.target.Write(data)
+		if !w.ended.Load() || n == len(data) {
+			return n, err
+		}
+	}
+	// 端末モードを戻す前に読み取ったCtrl+Cで、対象に渡らなかった分を処理する。
+	if bytes.IndexByte(data[n:], 3) >= 0 {
+		w.cancel()
+	}
+	if err != nil {
+		return n, err
+	}
+	return len(data), nil
 }
 
 func waitFailure(err error) error {
